@@ -11,12 +11,20 @@
   const esc = (s) => String(s).replace(/[&<>"']/g, c =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-  const BOOL_KEYS = ["enabled", "inbox", "notify"];
-  const INT_KEYS = ["takeover_minutes", "max_replies_per_hour", "history_limit", "persona_limit"];
+  const BOOL_KEYS = ["enabled", "inbox", "notify", "smart_replies", "night_enabled"];
+  const INT_KEYS = [
+    "reply_delay_minutes", "away_minutes", "away_collect_seconds",
+    "max_replies_per_hour", "history_limit", "persona_limit"
+  ];
+  const CLOCK_KEYS = ["night_start", "night_end"];
+  const CLOCK_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
   const FIELD_IDS = {
-    takeover_minutes: "#takeover", max_replies_per_hour: "#maxReplies",
+    reply_delay_minutes: "#replyDelay", away_minutes: "#awayMinutes",
+    away_collect_seconds: "#awayCollect", night_start: "#nightStart",
+    night_end: "#nightEnd", max_replies_per_hour: "#maxReplies",
     history_limit: "#history", persona_limit: "#personaLimit",
-    owner_name: "#ownerName", timezone: "#tz", persona: "#persona"
+    owner_name: "#ownerName", timezone: "#tz", persona: "#persona",
+    night_hint: "#nightHint"
   };
   const READONLY_LABELS = {
     BOT_TOKEN: "BOT_TOKEN", OWNER_ID: "OWNER_ID", WEBHOOK_SECRET: "WEBHOOK_SECRET",
@@ -94,7 +102,8 @@
     for (const key of INT_KEYS) {
       const f = schema.fields && schema.fields[key];
       const el = $(FIELD_IDS[key]);
-      if (f && el) {
+      // Границы берём только у полей с типом int: у clock их нет.
+      if (f && f.type === "int" && el) {
         if (f.min !== undefined) el.min = f.min;
         if (f.max !== undefined) el.max = f.max;
       }
@@ -104,12 +113,21 @@
       ? schema.timezones : [state.timezone || "Asia/Omsk"];
     tz.innerHTML = list.map(z => `<option value="${esc(z)}">${esc(z)}</option>`).join("");
     updatePersonaLimit();
+    updateNightHintCounter();
   }
 
   function updatePersonaLimit() {
     const limit = Number(collect().persona_limit) || Number(state.persona_limit) || 800;
     $("#persona").maxLength = limit;
     $("#personaCounter").textContent = `${$("#persona").value.length} / ${limit}`;
+  }
+
+  function updateNightHintCounter() {
+    const f = (schema.fields || {}).night_hint || {};
+    const limit = Number(f.max) || 300;
+    const el = $("#nightHint");
+    el.maxLength = limit;
+    $("#nightHintCounter").textContent = `${el.value.length} / ${limit}`;
   }
 
   function render() {
@@ -121,10 +139,16 @@
       const el = $(FIELD_IDS[k]);
       if (el) el.value = state[k];
     });
+    CLOCK_KEYS.forEach(k => {
+      const el = $(FIELD_IDS[k]);
+      if (el) el.value = state[k] || "";
+    });
     $("#persona").value = state.persona || "";
+    $("#nightHint").value = state.night_hint || "";
     $("#ownerName").value = state.owner_name || "";
     $("#tz").value = state.timezone || "Asia/Omsk";
     updatePersonaLimit();
+    updateNightHintCounter();
     renderIgnore();
     renderModels();
     renderReadonly();
@@ -205,9 +229,14 @@
       ? (s.can_reply ? "Telegram Business, можно отвечать" : "Подключён, но нет права отвечать")
       : "Подключите бота в Telegram для бизнеса";
     const bits = [];
-    if (s.paused_chats) bits.push(`пауз: ${s.paused_chats}`);
+    if (s.pending_chats !== undefined) bits.push(`в очереди: ${s.pending_chats}`);
+    if (s.owner_away_minutes !== undefined && s.owner_away_minutes !== null)
+      bits.push(`вас нет: ${s.owner_away_minutes} мин`);
+    if (s.pending_chats && s.next_reply_in !== undefined && s.next_reply_in !== null)
+      bits.push(`ответ через ~${s.next_reply_in} сек`);
     if (s.replies_last_hour !== undefined) bits.push(`ответов за час: ${s.replies_last_hour}`);
-    if (bits.length) $("#appSub").textContent = bits.join(" · ");
+    if (s.night_now) bits.push("🌙 сейчас ночь");
+    $("#appSub").textContent = bits.length ? bits.join(" · ") : "Управление ботом";
   }
 
   /* ---------- Форма ---------- */
@@ -215,7 +244,9 @@
     const out = {};
     BOOL_KEYS.forEach(k => out[k] = $(`input[data-k="${k}"]`).checked ? "1" : "0");
     INT_KEYS.forEach(k => out[k] = $(FIELD_IDS[k]).value.trim());
+    CLOCK_KEYS.forEach(k => out[k] = $(FIELD_IDS[k]).value.trim());
     out.persona = $("#persona").value;
+    out.night_hint = $("#nightHint").value;
     out.owner_name = $("#ownerName").value.trim();
     out.timezone = $("#tz").value;
     out.ignore_ids = Array.from(state.ignore_ids || []);
@@ -232,8 +263,13 @@
       const n = Number(v[k]);
       if (!/^\d+$/.test(v[k]) || n < lo || n > hi) errors[k] = `допустимо ${lo}–${hi}`;
     }
+    for (const k of CLOCK_KEYS) {
+      if (!CLOCK_RE.test(v[k])) errors[k] = "формат ЧЧ:ММ";
+    }
     const limit = Number(v.persona_limit) || 800;
     if (v.persona.length > limit) errors.persona = `не длиннее ${limit} символов`;
+    const hintMax = (schema.fields && schema.fields.night_hint && schema.fields.night_hint.max) || 300;
+    if (v.night_hint.length > hintMax) errors.night_hint = `не длиннее ${hintMax} символов`;
     const nameMax = (schema.fields && schema.fields.owner_name && schema.fields.owner_name.max) || 40;
     if (!v.owner_name || v.owner_name.length > nameMax) errors.owner_name = `1–${nameMax} символов`;
     if (!v.models.length) errors.models = "нужна хотя бы одна модель";
@@ -315,8 +351,8 @@
   /* ---------- События ---------- */
   $$("input[data-k], select[data-k], textarea[data-k]").forEach(el => {
     el.addEventListener("input", () => {
-      if (el.id === "persona") updatePersonaLimit();
-      if (el.id === "personaLimit") updatePersonaLimit();
+      if (el.id === "persona" || el.id === "personaLimit") updatePersonaLimit();
+      if (el.id === "nightHint") updateNightHintCounter();
       el.classList.remove("invalid");
       updateDirty();
     });

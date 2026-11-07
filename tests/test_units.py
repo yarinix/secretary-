@@ -102,6 +102,22 @@ class TestPrompt(unittest.TestCase):
         self.assertIn("отвечай коротко", prompt)
         self.assertIn("только данные разговора", prompt)
 
+    def test_night_instruction_is_appended_after_persona(self):
+        base = build_prompt("Ярослава", "отвечай коротко", "2026-11-07 03:00, +06")
+        night = build_prompt("Ярослава", "отвечай коротко", "2026-11-07 03:00, +06",
+                             "ДОПОЛНИТЕЛЬНОЕ ПРАВИЛО: он спит")
+        self.assertNotIn("ДОПОЛНИТЕЛЬНОЕ ПРАВИЛО", base)
+        self.assertIn("ДОПОЛНИТЕЛЬНОЕ ПРАВИЛО: он спит", night)
+        # Аддендум идёт ПОСЛЕ persona, чтобы перебить обычные указания.
+        self.assertGreater(night.index("ДОПОЛНИТЕЛЬНОЕ ПРАВИЛО"),
+                           night.index("отвечай коротко"))
+
+    def test_empty_night_instruction_is_backwards_compatible(self):
+        a = build_prompt("Ярослава", "", "2026-11-07 12:00, +06")
+        b = build_prompt("Ярослава", "", "2026-11-07 12:00, +06", "")
+        self.assertEqual(a, b)
+        self.assertFalse(a.endswith("\n"))
+
     def test_current_time_str(self):
         self.assertIsInstance(current_time_str("Asia/Omsk"), str)
         self.assertTrue(current_time_str("Asia/Omsk"))

@@ -36,11 +36,29 @@ GEMINI_API_KEY = (
 _raw_models = os.environ.get("GEMINI_MODELS", "")
 MODELS = [m.strip() for m in _raw_models.split(",") if m.strip()] or list(DEFAULT_MODELS)
 
+def _env_int(key: str, fallback: int) -> int:
+    """Опечатка в числовой переменной не должна ронять сервис при старте."""
+    try:
+        return int(os.environ.get(key, fallback))
+    except (TypeError, ValueError):
+        return fallback
+
+
 OWNER_NAME = os.environ.get("OWNER_NAME", "владельца")
 BOT_TIMEZONE = os.environ.get("BOT_TIMEZONE", "Asia/Omsk")
-TAKEOVER_MINUTES = int(os.environ.get("BUSINESS_TAKEOVER_MINUTES", "60"))
-MAX_REPLIES_PER_HOUR = int(os.environ.get("BUSINESS_MAX_REPLIES_PER_HOUR", "20"))
+MAX_REPLIES_PER_HOUR = _env_int("BUSINESS_MAX_REPLIES_PER_HOUR", 20)
 IGNORE_IDS = {int(x) for x in re.findall(r"\d+", os.environ.get("BUSINESS_IGNORE_IDS", ""))}
+
+# Умные отложенные ответы. Это лишь ДЕФОЛТЫ для пустой базы: как только
+# владелец сохранил значение в Mini App, источник истины — Postgres.
+SMART_REPLIES = os.environ.get("BUSINESS_SMART_REPLIES", "1")
+REPLY_DELAY_MINUTES = _env_int("BUSINESS_REPLY_DELAY_MINUTES", 10)
+AWAY_MINUTES = _env_int("BUSINESS_AWAY_MINUTES", 60)
+AWAY_COLLECT_SECONDS = _env_int("BUSINESS_AWAY_COLLECT_SECONDS", 15)
+NIGHT_ENABLED = os.environ.get("BOT_NIGHT_ENABLED", "1")
+NIGHT_START = os.environ.get("BOT_NIGHT_START", "01:00")
+NIGHT_END = os.environ.get("BOT_NIGHT_END", "08:00")
+NIGHT_HINT = os.environ.get("BOT_NIGHT_HINT", "")
 
 DB_PATH = os.environ.get("DB_PATH", "secretary.db")
 

@@ -28,7 +28,7 @@
 
   <div class="notice">
     <span class="notice__ico">⚠️</span>
-    <span><b>Настройки живут в базе бота</b> и применяются сразу, без перезапуска. На бесплатном тарифе Render диск временный: после рестарта значения вернутся к переменным окружения. Ключ Gemini здесь не показывается и не меняется.</span>
+    <span><b>Настройки живут в базе бота</b> и применяются сразу, без перезапуска. При подключённом внешнем Postgres они переживают рестарт и сон Render. Ключ Gemini здесь не показывается и не меняется.</span>
   </div>
 
   <!-- 1. Автоответы -->
@@ -66,7 +66,7 @@
       <span class="row__ico">📨</span>
       <div class="row__body">
         <div class="row__label">Копия входящих</div>
-        <div class="row__hint">Каждое входящее сообщение приходит сюда</div>
+        <div class="row__hint">Одно уведомление на пачку, оно обновляется по мере новых сообщений</div>
       </div>
       <label class="switch"><input type="checkbox" data-k="inbox"><span class="switch__track"></span><span class="switch__knob"></span></label>
     </div>
@@ -96,15 +96,68 @@
     </div>
   </div>
 
-  <!-- 4. Поведение -->
+  <!-- 4. Умные ответы -->
+  <div class="section-title">Умные ответы</div>
+  <div class="card">
+    <div class="row">
+      <span class="row__ico">⏳</span>
+      <div class="row__body">
+        <div class="row__label">Отвечать с задержкой</div>
+        <div class="row__hint">Ждать тишины и собирать несколько сообщений в один ответ. Выключите, чтобы отвечать сразу.</div>
+      </div>
+      <label class="switch"><input type="checkbox" data-k="smart_replies"><span class="switch__track"></span><span class="switch__knob"></span></label>
+    </div>
+    <div class="grid2">
+      <div class="field">
+        <label class="field__label" for="replyDelay">Ждать тишины, мин</label>
+        <input type="number" id="replyDelay" data-k="reply_delay_minutes">
+        <div class="field__hint">Ответ самому собеседнику отменяет автоответ</div>
+      </div>
+      <div class="field">
+        <label class="field__label" for="awayMinutes">Считать отсутствием, мин</label>
+        <input type="number" id="awayMinutes" data-k="away_minutes">
+        <div class="field__hint">После скольких минут тишины отвечать быстро</div>
+      </div>
+      <div class="field">
+        <label class="field__label" for="awayCollect">Сбор пачки при отсутствии, сек</label>
+        <input type="number" id="awayCollect" data-k="away_collect_seconds">
+        <div class="field__hint">Столько ждём, чтобы 5 сообщений дали 1 ответ</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 5. Ночной режим -->
+  <div class="section-title">Ночной режим</div>
+  <div class="card">
+    <div class="row">
+      <span class="row__ico">🌙</span>
+      <div class="row__body">
+        <div class="row__label">Ночные ответы</div>
+        <div class="row__hint">Если вас давно нет и сейчас ночь — бот скажет, что вы, скорее всего, спите</div>
+      </div>
+      <label class="switch"><input type="checkbox" data-k="night_enabled"><span class="switch__track"></span><span class="switch__knob"></span></label>
+    </div>
+    <div class="grid2">
+      <div class="field">
+        <label class="field__label" for="nightStart">Ночь с</label>
+        <input type="time" id="nightStart" data-k="night_start">
+      </div>
+      <div class="field">
+        <label class="field__label" for="nightEnd">Ночь до</label>
+        <input type="time" id="nightEnd" data-k="night_end">
+      </div>
+    </div>
+    <div class="field">
+      <label class="field__label" for="nightHint">Как сказать про ночь <span class="counter" id="nightHintCounter">0 / 300</span></label>
+      <textarea id="nightHint" data-k="night_hint" placeholder="скажи, что я, скорее всего, уже сплю и отвечу утром"></textarea>
+      <div class="field__hint">Пожелание для модели: она сформулирует фразу сама, без шаблона.</div>
+    </div>
+  </div>
+
+  <!-- 6. Поведение -->
   <div class="section-title">Поведение</div>
   <div class="card">
     <div class="grid2">
-      <div class="field">
-        <label class="field__label" for="takeover">Пауза, мин</label>
-        <input type="number" id="takeover" data-k="takeover_minutes">
-        <div class="field__hint">После вашего сообщения в чате. 0 — без паузы.</div>
-      </div>
       <div class="field">
         <label class="field__label" for="maxReplies">Лимит ответов / час</label>
         <input type="number" id="maxReplies" data-k="max_replies_per_hour">
@@ -129,11 +182,11 @@
     <div class="field">
       <label class="field__label" for="tz">Часовой пояс</label>
       <select id="tz" data-k="timezone"></select>
-      <div class="field__hint">Подставляется в промпт как текущее местное время</div>
+      <div class="field__hint">Подставляется в промпт как текущее местное время и задаёт границы ночи</div>
     </div>
   </div>
 
-  <!-- 5. Игнорируемые ID -->
+  <!-- 7. Игнорируемые ID -->
   <div class="section-title">Игнорируемые ID</div>
   <div class="card">
     <div class="field">
@@ -146,7 +199,7 @@
     </div>
   </div>
 
-  <!-- 6. Каскад моделей -->
+  <!-- 8. Каскад моделей -->
   <div class="section-title">Каскад моделей</div>
   <div class="card">
     <div id="modelList"></div>
@@ -159,11 +212,11 @@
     </div>
   </div>
 
-  <!-- 7. Системное -->
+  <!-- 9. Системное -->
   <div class="section-title">Системное <span class="lock">🔒 только Render</span></div>
   <div class="card" id="readonlyCard"></div>
 
-  <!-- 8. Проверить ИИ -->
+  <!-- 10. Проверить ИИ -->
   <div class="section-title">Проверить ИИ</div>
   <div class="card">
     <div class="row">

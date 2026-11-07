@@ -100,8 +100,16 @@ def current_time_str(tz_name: str = "Asia/Omsk") -> str:
     return now.strftime("%Y-%m-%d %H:%M (%A), %Z")
 
 
-def build_prompt(owner_name: str, persona: str, now_str: str) -> str:
-    """System prompt. Имени собеседника здесь НЕТ — это закрывает инъекцию через first_name."""
+def build_prompt(
+    owner_name: str, persona: str, now_str: str, night_instruction: str = ""
+) -> str:
+    """System prompt. Имени собеседника здесь НЕТ — это закрывает инъекцию через first_name.
+
+    ``night_instruction`` — необязательный аддендум для ночного режима. Он
+    добавляется ПОСЛЕ блока persona, чтобы явно перебить обычные указания
+    («отвечай по существу»). Аргумент по умолчанию сохраняет полную обратную
+    совместимость: существующие вызовы и тесты работают без изменений.
+    """
     prompt = (
         f"Ты отвечаешь в личной переписке в Telegram от имени {owner_name}: ты его помощник-автоответчик, "
         f"пока он занят. Сейчас: {now_str}.\n\n"
@@ -122,6 +130,8 @@ def build_prompt(owner_name: str, persona: str, now_str: str) -> str:
     )
     if persona:
         prompt += f"\n\nУказания владельца о том, как отвечать:\n{persona}"
+    if night_instruction:
+        prompt += f"\n\n{night_instruction.strip()}"
     return prompt
 
 

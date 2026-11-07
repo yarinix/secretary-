@@ -49,6 +49,22 @@ CONTENT_TYPES = {
     "app.js": "application/javascript",
 }
 
+# Явный белый список полей статуса. Раньше использовался чёрный список
+# («всё, кроме token/secret/initdata») — он пропустил бы любое новое поле,
+# случайно добавленное в status_provider(). Теперь наружу уходят только эти
+# ключи, и только простых типов.
+STATUS_KEYS = (
+    "connected",
+    "can_reply",
+    "pending_chats",
+    "owner_away_minutes",
+    "next_reply_in",
+    "night_now",
+    "replies_last_hour",
+    "max_replies_per_hour",
+    "persistent_storage",
+)
+
 
 def _json(payload: dict, status: int = 200) -> web.Response:
     return web.json_response(payload, status=status, headers=NO_STORE)
@@ -94,17 +110,24 @@ def _safe_readonly(readonly: dict | None) -> dict:
 
 
 def _safe_status(provider) -> dict:
+    """Только STATUS_KEYS и только скаляры: статус не может утечь в UI."""
     try:
         result = provider() if callable(provider) else {}
         if inspect.isawaitable(result):
+            # Закрываем неождаемую coroutine, иначе она утечёт с
+            # RuntimeWarning "coroutine was never awaited".
+            close = getattr(result, "close", None)
+            if callable(close):
+                close()
             return {}  # sync-контекст; main.py передаёт sync-функцию
         if not isinstance(result, dict):
             return {}
-        # На всякий случай не отдаём ничего похожего на секреты.
-        return {
-            k: v for k, v in result.items()
-            if not any(word in k.lower() for word in ("token", "secret", "initdata"))
-        }
+        safe: dict[str, Any] = {}
+        for key in STATUS_KEYS:
+            value = result.get(key)
+            if value is None or isinstance(value, (bool, int, float, str)):
+                safe[key] = value
+        return safe
     except Exception as e:
         log.warning("не удалось получить статус для Mini App: %s", type(e).__name__)
         return {}

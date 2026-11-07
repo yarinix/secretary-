@@ -48,6 +48,13 @@ TIMEZONES = (
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._:-]{1,80}$")
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# Границы тихих часов в формате HH:MM (24 часа, ведущий ноль обязателен).
+CLOCK_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+
+DEFAULT_NIGHT_HINT = (
+    "скажи, что я, скорее всего, уже сплю и отвечу утром. "
+    "Сформулируй это естественно и по-разному, коротко, без подробностей"
+)
 
 # Только для отображения в /api/state. Никогда не принимаются в /api/settings.
 READONLY_KEYS = (
@@ -70,10 +77,21 @@ SPECS: dict[str, dict[str, Any]] = {
     "inbox":                {"type": "bool", "label": "Копия входящих"},
     "notify":               {"type": "bool", "label": "Копия ответов"},
     "persona":              {"type": "text", "label": "Указания для бота"},
-    "takeover_minutes":     {"type": "int", "min": 0, "max": 240,
-                             "label": "Пауза после моего сообщения, мин"},
     "max_replies_per_hour": {"type": "int", "min": 0, "max": 100,
                              "label": "Лимит ответов в час"},
+    # --- умные отложенные ответы -------------------------------------------
+    "smart_replies":        {"type": "bool", "label": "Умные ответы"},
+    "reply_delay_minutes":  {"type": "int", "min": 0, "max": 240,
+                             "label": "Ждать тишины, мин"},
+    "away_minutes":         {"type": "int", "min": 5, "max": 720,
+                             "label": "Считать отсутствием, мин"},
+    "away_collect_seconds": {"type": "int", "min": 0, "max": 120,
+                             "label": "Сбор пачки при отсутствии, сек"},
+    "night_enabled":        {"type": "bool", "label": "Ночной режим"},
+    "night_start":          {"type": "clock", "label": "Ночь с"},
+    "night_end":            {"type": "clock", "label": "Ночь до"},
+    "night_hint":           {"type": "text", "max": 300,
+                             "label": "Как сказать про ночь"},
     # 40 — верхняя граница helpers.clean_name(); держим одно и то же число,
     # иначе длинное имя молча обрезалось бы вместо понятной ошибки валидации.
     "owner_name":           {"type": "name", "min": 1, "max": 40,
@@ -119,12 +137,18 @@ def build_defaults(cfg_like) -> dict[str, Any]:
             return fallback
 
     tz = str(_get(cfg_like, "BOT_TIMEZONE", "Asia/Omsk") or "Asia/Omsk")
+
+    def _clock(key: str, fallback: str) -> str:
+        value = str(_get(cfg_like, key, fallback) or fallback).strip()
+        return value if CLOCK_RE.fullmatch(value) else fallback
+
+    hint = _CONTROL_RE.sub("", str(_get(cfg_like, "NIGHT_HINT", DEFAULT_NIGHT_HINT)
+                                   or DEFAULT_NIGHT_HINT))[:300]
     return {
         "enabled": "1",
         "inbox": "1",
         "notify": "1",
         "persona": "",
-        "takeover_minutes": _int("TAKEOVER_MINUTES", 60),
         "max_replies_per_hour": _int("MAX_REPLIES_PER_HOUR", 20),
         "owner_name": clean_name(_get(cfg_like, "OWNER_NAME", "владельца")) or "владельца",
         "timezone": tz if tz in TIMEZONES else "Asia/Omsk",
@@ -133,6 +157,15 @@ def build_defaults(cfg_like) -> dict[str, Any]:
                    or ["gemini-3.5-flash-lite"],
         "history_limit": _int("HISTORY_LIMIT", 12),
         "persona_limit": _int("PERSONA_LIMIT", 800),
+        # --- умные отложенные ответы ---
+        "smart_replies": "1" if str(_get(cfg_like, "SMART_REPLIES", "1")) != "0" else "0",
+        "reply_delay_minutes": _int("REPLY_DELAY_MINUTES", 10),
+        "away_minutes": _int("AWAY_MINUTES", 60),
+        "away_collect_seconds": _int("AWAY_COLLECT_SECONDS", 15),
+        "night_enabled": "1" if str(_get(cfg_like, "NIGHT_ENABLED", "1")) != "0" else "0",
+        "night_start": _clock("NIGHT_START", "01:00"),
+        "night_end": _clock("NIGHT_END", "08:00"),
+        "night_hint": hint,
     }
 
 
@@ -152,6 +185,11 @@ def encode(key: str, value: Any, defaults: dict) -> str:
         raise ValueError("ожидалось 1 / 0")
     if kind == "int":
         return str(int(value))
+    if kind == "clock":
+        text = str(value if value is not None else "").strip()
+        if not CLOCK_RE.fullmatch(text):
+            raise ValueError("ожидался формат ЧЧ:ММ")
+        return text
     if kind in ("text", "name", "enum"):
         return str(value if value is not None else "")
     if kind in ("int_list", "str_list"):
@@ -174,6 +212,9 @@ def decode(key: str, raw: str | None, defaults: dict) -> Any:
             value = int(str(raw).strip())
             lo, hi = SPECS[key]["min"], SPECS[key]["max"]
             return value if lo <= value <= hi else fallback
+        if kind == "clock":
+            text = str(raw).strip()
+            return text if CLOCK_RE.fullmatch(text) else fallback
         if kind in ("text", "name", "enum"):
             value = str(raw)
             if kind == "name":
@@ -227,14 +268,24 @@ def _normalize(key: str, value: Any, defaults: dict, patch: dict) -> Any:
             raise ValueError(f"допустимо {lo}–{hi}")
         return number
 
+    if kind == "clock":
+        text = str(value if value is not None else "").strip()
+        if not CLOCK_RE.fullmatch(text):
+            raise ValueError("ожидался формат ЧЧ:ММ (например 01:00)")
+        return text
+
     if kind == "text":
         text = _CONTROL_RE.sub("", str(value if value is not None else ""))
-        # Лимит берём из того же patch (если меняется), иначе из defaults —
-        # иначе одновременно «увеличить лимит и текст» ложно отбросится.
-        try:
-            limit = int(patch.get("persona_limit", defaults["persona_limit"]))
-        except (TypeError, ValueError):
-            limit = int(defaults["persona_limit"])
+        # У текстового поля может быть собственный лимит в SPECS (night_hint).
+        # Для persona лимит настраиваемый и берётся из того же patch — иначе
+        # одновременно «увеличить лимит и текст» ложно отбросится.
+        if "max" in spec:
+            limit = int(spec["max"])
+        else:
+            try:
+                limit = int(patch.get("persona_limit", defaults["persona_limit"]))
+            except (TypeError, ValueError):
+                limit = int(defaults["persona_limit"])
         if len(text) > limit:
             raise ValueError(f"не длиннее {limit} символов")
         return text
