@@ -241,6 +241,7 @@ async def _update_cache() -> None:
         "replies_last_hour": replies,
         "max_replies_per_hour": state["max_replies_per_hour"],
         "persistent_storage": bool(cfg.DATABASE_URL),
+        "seen_watcher_enabled": bool(cfg.SEEN_WEBHOOK_SECRET),
     }
 
 
@@ -340,6 +341,61 @@ async def _upsert_inbox_notification(row: dict, info: dict, state: dict) -> None
     mid = await _send_or_edit(info, _batch_notification_text(row), row.get("notify_message_id"))
     if mid and mid != row.get("notify_message_id"):
         await asyncio.to_thread(storage.set_notify_message_id, int(row["chat_id"]), mid)
+
+
+# ---------- «прочитал, но намеренно не ответил» ------------------------------
+
+async def owner_seen_provider(
+    chat_id: int, max_read_id: int | None, read_at: float | None
+) -> dict:
+    """Отменяет пачку, если прочтение покрывает ВСЕ сообщения в ней.
+
+    Сигнал приходит из seen_watcher.py (MTProto-сессия владельца): Telegram
+    Bot API не сообщает боту о прочтении, это единственный автоматический путь.
+
+    Два независимых критерия через OR: шкалы `message_id` в Bot API и MTProto
+    для приватных чатов обычно совпадают, но официально это не гарантировано.
+      * ``max_read_id >= max(seen_ids)`` — точное покрытие по id;
+      * ``read_at >= last_at - 2``      — страховка по времени (допуск на часы).
+    Если ПОСЛЕ прочтения пришли новые сообщения, оба критерия ложны и пачка
+    остаётся: владелец их ещё не видел, автоответ всё ещё нужен.
+    """
+    row = await asyncio.to_thread(storage.get_pending, chat_id)
+    if row is None:
+        return {"cancelled": False, "reason": "no_pending"}
+    if row.get("claimed_at") is not None:
+        # Воркер уже отправил ответ или находится в полёте — не дёргаем.
+        return {"cancelled": False, "reason": "already_claimed"}
+
+    ids = [int(x) for x in (row.get("seen_ids") or [])]
+    by_id = max_read_id is not None and bool(ids) and max_read_id >= max(ids)
+    by_time = read_at is not None and read_at >= float(row.get("last_at") or 0) - 2.0
+    if not (by_id or by_time):
+        return {"cancelled": False, "reason": "new_messages_after_read"}
+
+    cancelled = await asyncio.to_thread(storage.cancel_pending, chat_id)
+    if cancelled is None:
+        return {"cancelled": False, "reason": "race_lost"}
+
+    # last_owner_at НЕ трогаем: это время исходящего сообщения («онлайн»),
+    # а прочтение входящего к нему отношения не имеет. Заводим отдельный ключ.
+    await asyncio.to_thread(storage.set_meta, "owner_seen_at", repr(time.time()))
+
+    # Контекст диалога не теряем — как и при ответе владельца вручную.
+    if cancelled.get("parts"):
+        state = await rt()
+        await asyncio.to_thread(
+            storage.save_message, chat_id, "user",
+            policy.build_batch_text(cancelled["parts"]),
+            max(40, state["history_limit"]),
+        )
+    info = await get_connection(cancelled.get("conn_id") or "")
+    if info:
+        await _mark_notification(
+            cancelled, info, "👀 Вы прочитали сообщение — автоответ отменён"
+        )
+    await _update_cache()
+    return {"cancelled": True, "reason": "owner_read"}
 
 
 # ---------- медиа и лимиты ----------
@@ -842,6 +898,8 @@ def main():
         status_provider=status_provider,
         readonly=READONLY_SNAPSHOT,
         test_ai_provider=test_ai_provider,
+        seen_secret=cfg.SEEN_WEBHOOK_SECRET,
+        seen_provider=owner_seen_provider,
     )
     app.cleanup_ctx.append(pending_worker)
     app.on_startup.append(on_startup)

@@ -1,0 +1,5 @@
+# Зависимости ТОЛЬКО для seen_watcher.py (MTProto-сессия владельца).
+# НЕ добавлять в requirements.txt основного сервиса: на Render Free watcher
+# не запускается, и тащить Telethon в веб-процесс незачем.
+Telethon>=1.36,<2
+aiohttp>=3.9

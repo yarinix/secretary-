@@ -74,6 +74,12 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET") or hashlib.sha256(
     TOKEN.encode()
 ).hexdigest()[:32]
 WEBHOOK_PATH = "/webhook"
+
+# Отдельный machine-to-machine секрет для POST /internal/seen (сигнал от
+# внешнего MTProto-watcher'а о том, что владелец прочитал чат). НЕ производный
+# от BOT_TOKEN: утечка токена бота не должна давать право отменять пачки.
+# Пусто -> приёмник не регистрируется, фича выключена.
+SEEN_WEBHOOK_SECRET = os.environ.get("SEEN_WEBHOOK_SECRET", "").strip()
 BASE_URL = (
     os.environ.get("WEBHOOK_BASE_URL") or os.environ.get("RENDER_EXTERNAL_URL") or ""
 ).rstrip("/")

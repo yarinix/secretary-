@@ -264,6 +264,83 @@ class TestReplyFlow(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.storage.get_pending(1))
         self.assertEqual(self.bot.replies, [])
 
+    # ---------- «прочитал, но намеренно не ответил» --------------------------
+
+    async def test_owner_read_by_id_cancels_batch(self):
+        for i in range(5):
+            await self.main.on_business_message(
+                make_message(text=f"сообщение {i}", message_id=100 + i)
+            )
+        result = await self.main.owner_seen_provider(1, 104, None)
+        self.assertTrue(result["cancelled"])
+        self.assertIsNone(self.storage.get_pending(1))
+        self.assertEqual(self.bot.replies, [])
+        self.assertIsNotNone(self.storage.get_meta("owner_seen_at"))
+        self.assertTrue(any("прочитали" in e[2].lower() for e in self.bot.edited))
+
+    async def test_owner_read_by_time_cancels_when_ids_mismatch(self):
+        """Страховка по времени, если шкалы message_id Bot API/MTProto разошлись."""
+        await self.main.on_business_message(make_message(message_id=900))
+        row = self.storage.get_pending(1)
+        result = await self.main.owner_seen_provider(1, 1, float(row["last_at"]) + 1)
+        self.assertTrue(result["cancelled"])
+        self.assertIsNone(self.storage.get_pending(1))
+
+    async def test_read_before_new_messages_does_not_cancel(self):
+        """Прочитал старое, потом пришли новые — автоответ всё ещё нужен."""
+        await self.main.on_business_message(make_message(message_id=1))
+        await self.main.on_business_message(make_message(text="второе", message_id=2))
+        row = self.storage.get_pending(1)
+        result = await self.main.owner_seen_provider(
+            1, 1, float(row["last_at"]) - 100
+        )
+        self.assertFalse(result["cancelled"])
+        self.assertEqual(result["reason"], "new_messages_after_read")
+        self.assertIsNotNone(self.storage.get_pending(1))
+
+    async def test_owner_read_is_idempotent(self):
+        await self.main.on_business_message(make_message(message_id=1))
+        first = await self.main.owner_seen_provider(1, 1, None)
+        second = await self.main.owner_seen_provider(1, 1, None)
+        self.assertTrue(first["cancelled"])
+        self.assertFalse(second["cancelled"])
+        self.assertEqual(second["reason"], "no_pending")
+
+    async def test_owner_read_cancels_only_this_chat(self):
+        await self.main.on_business_message(make_message(chat_id=1, message_id=1))
+        await self.main.on_business_message(make_message(chat_id=2, message_id=2))
+        await self.main.owner_seen_provider(1, 1, None)
+        self.assertIsNone(self.storage.get_pending(1))
+        self.assertIsNotNone(self.storage.get_pending(2))
+
+    async def test_claimed_batch_not_cancelled(self):
+        await self.main.on_business_message(make_message(message_id=1))
+        with self.storage._lock, self.storage.db:
+            self.storage.db.execute(
+                "UPDATE secretary_pending SET claimed_at=?, claim_token=? WHERE chat_id=1",
+                (time.time(), "token"),
+            )
+        result = await self.main.owner_seen_provider(1, 1, None)
+        self.assertFalse(result["cancelled"])
+        self.assertEqual(result["reason"], "already_claimed")
+        self.assertIsNotNone(self.storage.get_pending(1))
+
+    async def test_owner_read_keeps_dialog_context(self):
+        for i in range(3):
+            await self.main.on_business_message(
+                make_message(text=f"реплика {i}", message_id=10 + i)
+            )
+        await self.main.owner_seen_provider(1, 12, None)
+        history = self.storage.get_history(1, 20)
+        users = [h["text"] for h in history if h["role"] == "user"]
+        self.assertEqual(len(users), 1)
+        self.assertIn("реплика 2", users[0])
+
+    async def test_owner_read_does_not_change_last_owner_at(self):
+        await self.main.on_business_message(make_message(message_id=1))
+        await self.main.owner_seen_provider(1, 1, None)
+        self.assertIsNone(self.storage.get_meta("last_owner_at"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,18 +9,22 @@
   POST /api/state    -> текущие настройки + статус + схема
   POST /api/settings -> атомарное сохранение patch
   POST /api/test-ai  -> тестовый запрос к каскаду (опционально)
+  POST /internal/seen-> сигнал «владелец прочитал чат» от внешнего watcher'а
 
 Безопасность:
   * авторизация `initData` выполняется ДО любого чтения/записи БД;
   * доступ только у OWNER_ID;
   * read-only системные значения никогда не принимаются от клиента;
   * BOT_TOKEN, ключ Gemini и initData не логируются и не уходят в JSON;
+  * /internal/seen — отдельный machine-to-machine секрет, НЕ initData.
+    Роут не регистрируется вообще, если секрет не задан;
   * ответы всегда с Cache-Control: no-store, тело запроса ограничено 64 КБ.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hmac
 import inspect
 import json
 import logging
@@ -63,6 +67,7 @@ STATUS_KEYS = (
     "replies_last_hour",
     "max_replies_per_hour",
     "persistent_storage",
+    "seen_watcher_enabled",
 )
 
 
@@ -160,6 +165,44 @@ def _authorize(request: web.Request, data: dict, bot_token: str, owner_id: int) 
     return parsed
 
 
+# ---- machine-to-machine: сигнал прочтения от seen_watcher.py -----------------
+
+MAX_SEEN_INT = 2 ** 63 - 1
+
+
+def _coerce_int(value, *, allow_none: bool = False):
+    """Строго целое. bool не принимаем (в Python bool является подклассом int)."""
+    if value is None and allow_none:
+        return None
+    if isinstance(value, bool):
+        return None
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        return None
+    return result if 0 <= result <= MAX_SEEN_INT else None
+
+
+def _coerce_float(value, *, allow_none: bool = False):
+    if value is None and allow_none:
+        return None
+    if isinstance(value, bool):
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    # Отрицательный epoch и далёкое будущее — битые часы, не доверяем.
+    return result if result >= 0 else None
+
+
+def _seen_secret_from(request: web.Request) -> str:
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return request.headers.get("X-Seen-Secret", "").strip()
+
+
 def register_webapp_routes(
     app: web.Application,
     *,
@@ -171,10 +214,18 @@ def register_webapp_routes(
     readonly: dict | None = None,
     test_ai_provider=None,
     web_dir: Path | None = None,
+    seen_secret: str = "",
+    seen_provider=None,
 ) -> None:
     """Регистрирует роуты Mini App. Ничего не знает про модуль `config`."""
     base = Path(web_dir) if web_dir is not None else WEB_DIR
     safe_readonly = _safe_readonly(readonly)
+    # Отдельный секрет для machine-to-machine. Короткий/пустой — роут вообще
+    # не появляется в роутере, чтобы нельзя было отменить пачки без авторизации.
+    secret = str(seen_secret or "").strip()
+    if secret and len(secret) < 16:
+        log.error("SEEN_WEBHOOK_SECRET короче 16 символов — /internal/seen отключён")
+        secret = ""
 
     async def serve_app(_: web.Request) -> web.Response:
         path = base / "index.html"
@@ -264,9 +315,52 @@ def register_webapp_routes(
         # когда Postgres недоступен, иначе он решит, что сервис упал.
         return web.Response(text="ok", headers=NO_STORE)
 
+    async def internal_seen(request: web.Request) -> web.Response:
+        """Приём «владелец прочитал чат» от внешнего MTProto-watcher'а.
+
+        Здесь НЕ initData: это server-to-server вызов с отдельным секретом.
+        Ни секрет, ни содержимое сообщений не логируются и не уходят в ответ.
+        """
+        if not secret:
+            return _fail(404, "нет такого ресурса")
+        provided = _seen_secret_from(request)
+        if not provided or not hmac.compare_digest(provided, secret):
+            return _fail(401, "не авторизован")
+        try:
+            data = await _body(request)
+        except AuthError as e:
+            return _fail(e.status, e.message)
+
+        chat_id = _coerce_int(data.get("chat_id"))
+        max_read_id = _coerce_int(data.get("max_read_id"), allow_none=True)
+        read_at = _coerce_float(data.get("read_at"), allow_none=True)
+        if chat_id is None or chat_id <= 0:
+            return _fail(400, "chat_id обязателен")
+        if max_read_id is None and read_at is None:
+            return _fail(400, "нужен max_read_id или read_at")
+        if seen_provider is None:
+            return _fail(503, "обработчик прочтения не настроен")
+
+        try:
+            result = seen_provider(chat_id, max_read_id, read_at)
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception as e:
+            log.warning("обработчик прочтения не сработал: %s", type(e).__name__)
+            return _fail(502, "не удалось обработать сигнал прочтения")
+        payload = result if isinstance(result, dict) else {}
+        return _json({
+            "ok": True,
+            "cancelled": bool(payload.get("cancelled")),
+            "reason": str(payload.get("reason") or ""),
+        })
+
     app.router.add_get("/health", health_probe)
     app.router.add_get("/app", serve_app)
     app.router.add_get("/static/{name}", serve_static)
     app.router.add_post("/api/state", api_state)
     app.router.add_post("/api/settings", api_settings)
     app.router.add_post("/api/test-ai", api_test_ai)
+    if secret:
+        app.router.add_post("/internal/seen", internal_seen)
+        log.info("приёмник /internal/seen включён")

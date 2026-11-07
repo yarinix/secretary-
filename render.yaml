@@ -52,5 +52,11 @@ services:
       # DSN от Supabase / Neon / Render Postgres вида postgresql://...
       - key: DATABASE_URL
         sync: false
+      # Отдельный machine-to-machine секрет для POST /internal/seen.
+      # Пусто -> приёмник не регистрируется и фича выключена (безопасно).
+      # Должен совпадать с SECRETARY_SEEN_SECRET у отдельного seen_watcher.py.
+      # НЕ задавайте здесь TELEGRAM_SESSION: watcher живёт в другом процессе.
+      - key: SEEN_WEBHOOK_SECRET
+        sync: false
       # RENDER_EXTERNAL_URL Render подставляет автоматически; при необходимости
       # можно задать WEBHOOK_BASE_URL вручную (sync: false).
