@@ -40,8 +40,10 @@ def make_init_data(bot_token=BOT_TOKEN, user_id=OWNER_ID, auth_date=None):
 CFG_STUB = SimpleNamespace(
     MODELS=["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"],
     IGNORE_IDS=set(), OWNER_NAME="Артём", BOT_TIMEZONE="Asia/Omsk",
-    TAKEOVER_MINUTES=60, MAX_REPLIES_PER_HOUR=20,
-    HISTORY_LIMIT=12, PERSONA_LIMIT=800,
+    MAX_REPLIES_PER_HOUR=20, HISTORY_LIMIT=12, PERSONA_LIMIT=800,
+    SMART_REPLIES="1", REPLY_DELAY_MINUTES=10, AWAY_MINUTES=60,
+    AWAY_COLLECT_SECONDS=15, NIGHT_ENABLED="1",
+    NIGHT_START="01:00", NIGHT_END="08:00", NIGHT_HINT="",
 )
 
 READONLY = {
@@ -69,7 +71,12 @@ class TestWebAppRoutes(unittest.IsolatedAsyncioTestCase):
             defaults=self.defaults,
             status_provider=lambda: {
                 "connected": True, "can_reply": True,
-                "paused_chats": 0, "replies_last_hour": 3,
+                "pending_chats": 2, "owner_away_minutes": 75,
+                "next_reply_in": 42, "night_now": True,
+                "replies_last_hour": 3,
+                # Посторонние поля и секреты не должны пройти в ответ.
+                "takeover_minutes": 30, "BOT_TOKEN": "SECRET_LEAK_CANARY",
+                "internal_secret": "SECRET_LEAK_CANARY",
             },
             readonly=READONLY,
             web_dir=WEB_DIR,
@@ -133,32 +140,70 @@ class TestWebAppRoutes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status, 200)
         self.assertEqual(r.headers.get("Cache-Control"), "no-store")
         data = await r.json()
-        self.assertEqual(data["settings"]["takeover_minutes"], 60)
+        self.assertEqual(data["settings"]["reply_delay_minutes"], 10)
+        self.assertEqual(data["settings"]["night_start"], "01:00")
         self.assertEqual(data["status"]["replies_last_hour"], 3)
+        self.assertEqual(data["status"]["pending_chats"], 2)
+        self.assertEqual(data["status"]["night_now"], True)
         self.assertIn("fields", data["schema"])
         self.assertTrue(data["readonly"]["api_key_set"])
+        # _safe_status — явный белый список, а не «всё кроме secrets».
+        self.assertNotIn("SECRET_LEAK_CANARY", json.dumps(data, ensure_ascii=False))
+        self.assertNotIn("takeover_minutes", data["status"])
+        self.assertNotIn("internal_secret", data["status"])
         raw = json.dumps(data, ensure_ascii=False)
         self.assertNotIn(BOT_TOKEN, raw)
         self.assertNotIn(SECRET_HEX, raw)
         self.assertNotIn(self.init, raw)
         self.assertNotIn("hash", data["readonly"])
 
+    async def test_status_async_provider_returns_empty(self):
+        # webapp не должен ждать awaitable: status_provider обязан быть sync.
+        from webapp import _safe_status
+
+        async def async_provider():
+            return {"connected": True}
+
+        self.assertEqual(_safe_status(async_provider), {})
+
     # ---------- сохранение ----------
     async def test_settings_valid_changes_runtime(self):
         r = await self.client.post(
-            "/api/settings", json={"initData": self.init, "settings": {"takeover_minutes": "10"}}
+            "/api/settings", json={"initData": self.init, "settings": {"reply_delay_minutes": "3"}}
         )
         self.assertEqual(r.status, 200)
         data = await r.json()
-        self.assertEqual(data["settings"]["takeover_minutes"], 10)
+        self.assertEqual(data["settings"]["reply_delay_minutes"], 3)
         state = await (await self.state()).json()
-        self.assertEqual(state["settings"]["takeover_minutes"], 10)
-        self.assertEqual(self.db.get_setting("takeover_minutes"), "10")
+        self.assertEqual(state["settings"]["reply_delay_minutes"], 3)
+        self.assertEqual(self.db.get_setting("reply_delay_minutes"), "3")
+
+    async def test_settings_clock_and_hint_roundtrip(self):
+        patch = {"night_start": "23:30", "night_end": "07:15", "night_hint": "сплю до утра"}
+        r = await self.client.post(
+            "/api/settings", json={"initData": self.init, "settings": patch}
+        )
+        self.assertEqual(r.status, 200)
+        data = await r.json()
+        self.assertEqual(data["settings"]["night_start"], "23:30")
+        self.assertEqual(data["settings"]["night_end"], "07:15")
+        self.assertEqual(data["settings"]["night_hint"], "сплю до утра")
+
+    async def test_settings_bad_clock_rejected(self):
+        r = await self.client.post(
+            "/api/settings", json={"initData": self.init, "settings": {"night_start": "99:99"}}
+        )
+        self.assertEqual(r.status, 400)
+        self.assertIn("night_start", (await r.json())["errors"])
+        self.assertEqual(self.db.get_all_settings(), {})
 
     async def test_settings_full_patch(self):
         patch = {
             "enabled": "0", "inbox": "0", "notify": "1",
-            "persona": "Отвечай коротко", "takeover_minutes": "10",
+            "persona": "Отвечай коротко", "smart_replies": "1",
+            "reply_delay_minutes": "10", "away_minutes": "60",
+            "away_collect_seconds": "15", "night_enabled": "1",
+            "night_start": "01:00", "night_end": "08:00", "night_hint": "сплю",
             "max_replies_per_hour": "50", "owner_name": "Иван",
             "timezone": "Europe/Moscow", "ignore_ids": [111, 222],
             "models": ["m1", "m2"], "history_limit": "20", "persona_limit": "900",
@@ -176,7 +221,7 @@ class TestWebAppRoutes(unittest.IsolatedAsyncioTestCase):
         r = await self.client.post(
             "/api/settings",
             json={"initData": self.init, "settings": {
-                "takeover_minutes": "10", "max_replies_per_hour": "999",
+                "reply_delay_minutes": "10", "max_replies_per_hour": "999",
             }},
         )
         self.assertEqual(r.status, 400)
@@ -196,7 +241,7 @@ class TestWebAppRoutes(unittest.IsolatedAsyncioTestCase):
 
     async def test_settings_requires_auth_before_db_write(self):
         r = await self.client.post(
-            "/api/settings", json={"settings": {"takeover_minutes": "10"}}
+            "/api/settings", json={"settings": {"reply_delay_minutes": "10"}}
         )
         self.assertEqual(r.status, 401)
         self.assertEqual(self.db.get_all_settings(), {})

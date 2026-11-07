@@ -24,8 +24,10 @@ DSN = "postgresql://user:supersecret@db.example.com:5432/secretary"
 CFG_STUB = SimpleNamespace(
     MODELS=["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"],
     IGNORE_IDS=set(), OWNER_NAME="Артём", BOT_TIMEZONE="Asia/Omsk",
-    TAKEOVER_MINUTES=60, MAX_REPLIES_PER_HOUR=20,
-    HISTORY_LIMIT=12, PERSONA_LIMIT=800,
+    MAX_REPLIES_PER_HOUR=20, HISTORY_LIMIT=12, PERSONA_LIMIT=800,
+    SMART_REPLIES="1", REPLY_DELAY_MINUTES=10, AWAY_MINUTES=60,
+    AWAY_COLLECT_SECONDS=15, NIGHT_ENABLED="1",
+    NIGHT_START="01:00", NIGHT_END="08:00", NIGHT_HINT="",
 )
 
 READONLY = {

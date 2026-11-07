@@ -24,9 +24,25 @@ services:
         sync: false
       - key: BOT_TIMEZONE
         sync: false
-      - key: BUSINESS_TAKEOVER_MINUTES
-        sync: false
       - key: BUSINESS_MAX_REPLIES_PER_HOUR
+        sync: false
+      # Умные отложенные ответы. ВСЕ необязательны: дефолты заданы в config.py,
+      # а источник истины после первого сохранения — БД (Mini App).
+      - key: BUSINESS_SMART_REPLIES
+        sync: false
+      - key: BUSINESS_REPLY_DELAY_MINUTES
+        sync: false
+      - key: BUSINESS_AWAY_MINUTES
+        sync: false
+      - key: BUSINESS_AWAY_COLLECT_SECONDS
+        sync: false
+      - key: BOT_NIGHT_ENABLED
+        sync: false
+      - key: BOT_NIGHT_START
+        sync: false
+      - key: BOT_NIGHT_END
+        sync: false
+      - key: BOT_NIGHT_HINT
         sync: false
       - key: BUSINESS_IGNORE_IDS
         sync: false
