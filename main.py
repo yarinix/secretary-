@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import sqlite3
 import time
 
@@ -13,8 +14,22 @@ from aiohttp import web
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("secretary")
 
-TOKEN = os.environ["BOT_TOKEN"]
-ENV_OWNER_ID = int(os.environ.get("OWNER_ID", "0") or 0)
+def clean_token(raw: str) -> str:
+    token = "".join(raw.split())  # убрать любые пробелы, переносы, табы
+    for junk in ("​", "‌", "‍", "﻿", " "):
+        token = token.replace(junk, "")
+    if "=" in token:  # вставили "BOT_TOKEN=123:ABC"
+        token = token.split("=", 1)[1]
+    return token.strip("'\"")
+
+
+TOKEN = clean_token(os.environ.get("BOT_TOKEN", ""))
+if not re.fullmatch(r"\d+:[A-Za-z0-9_-]{30,}", TOKEN):
+    raise SystemExit(
+        f"BOT_TOKEN выглядит неверно (длина {len(TOKEN)}, двоеточий: {TOKEN.count(':')}). "
+        "Нужен токен из @BotFather вида 123456789:AAxxxx..."
+    )
+ENV_OWNER_ID = int(re.sub(r"\D", "", os.environ.get("OWNER_ID", "")) or 0)
 SECRET = os.environ.get("WEBHOOK_SECRET", "change-me")
 BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
