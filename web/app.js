@@ -21,6 +21,7 @@
   const READONLY_LABELS = {
     BOT_TOKEN: "BOT_TOKEN", OWNER_ID: "OWNER_ID", WEBHOOK_SECRET: "WEBHOOK_SECRET",
     PORT: "PORT", DB_PATH: "DB_PATH", BASE_URL: "BASE_URL", APP_URL: "Mini App URL",
+    STORAGE_BACKEND: "Хранилище настроек",
     api_key_set: "Ключ Gemini (ANTHROPIC_API_KEY)"
   };
 

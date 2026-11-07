@@ -58,6 +58,9 @@ READONLY_KEYS = (
     "DB_PATH",
     "BASE_URL",
     "APP_URL",
+    # Производная строка («Postgres (устойчиво)» / «SQLite (временный)»),
+    # а не DSN: показываем владельцу, переживут ли настройки рестарт.
+    "STORAGE_BACKEND",
     "api_key_set",
 )
 

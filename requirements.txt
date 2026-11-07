@@ -1,4 +1,7 @@
 aiogram>=3.13,<4
 aiohttp>=3.9
+# Драйвер внешнего Postgres: нужен только когда задан DATABASE_URL.
+# binary-колёса не требуют libpq и компилятора на slim-образах.
+psycopg[binary]>=3.1,<4
 # zoneinfo на slim-образах без системной tzdata (часовые пояса в Mini App)
 tzdata>=2023.3

@@ -32,5 +32,9 @@ services:
         sync: false
       - key: WEBHOOK_SECRET
         generateValue: true
+      # Внешний Postgres: настройки Mini App переживают рестарт/сон Free-сервиса.
+      # DSN от Supabase / Neon / Render Postgres вида postgresql://...
+      - key: DATABASE_URL
+        sync: false
       # RENDER_EXTERNAL_URL Render подставляет автоматически; при необходимости
       # можно задать WEBHOOK_BASE_URL вручную (sync: false).
