@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: secretary-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: OWNER_ID
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: WEBHOOK_SECRET
+        generateValue: true
