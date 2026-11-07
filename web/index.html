@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Секретарь · Настройки</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<header class="appbar">
+  <div class="appbar__avatar">🤖</div>
+  <div class="appbar__titles">
+    <span class="appbar__h">Секретарь</span>
+    <span class="appbar__sub" id="appSub">Управление ботом</span>
+  </div>
+  <span class="badge" id="connBadge">…</span>
+</header>
+
+<main class="scroll" id="scroll">
+
+  <div class="gate" id="gate" hidden>
+    <div class="gate__ico">🔒</div>
+    <div class="gate__title" id="gateTitle">Откройте приложение из бота</div>
+    <div class="gate__text" id="gateText">Настройки доступны только владельцу и только внутри Telegram.</div>
+  </div>
+
+  <div class="notice">
+    <span class="notice__ico">⚠️</span>
+    <span><b>Настройки живут в базе бота</b> и применяются сразу, без перезапуска. На бесплатном тарифе Render диск временный: после рестарта значения вернутся к переменным окружения. Ключ Gemini здесь не показывается и не меняется.</span>
+  </div>
+
+  <!-- 1. Автоответы -->
+  <div class="section-title">Автоответы</div>
+  <div class="card">
+    <div class="row">
+      <span class="row__ico">💬</span>
+      <div class="row__body">
+        <div class="row__label">Отвечать за меня</div>
+        <div class="row__hint">Бот отвечает в личных чатах от вашего лица</div>
+      </div>
+      <label class="switch"><input type="checkbox" data-k="enabled"><span class="switch__track"></span><span class="switch__knob"></span></label>
+    </div>
+    <div class="row">
+      <span class="row__ico">🔌</span>
+      <div class="row__body">
+        <div class="row__label">Подключение</div>
+        <div class="row__hint" id="connHint">Telegram Business</div>
+      </div>
+    </div>
+    <div class="row">
+      <span class="row__ico">🧠</span>
+      <div class="row__body">
+        <div class="row__label">Каскад Gemini</div>
+        <div class="row__hint" id="cascadeHint">—</div>
+      </div>
+      <span class="badge" id="keyBadge">—</span>
+    </div>
+  </div>
+
+  <!-- 2. Уведомления -->
+  <div class="section-title">Уведомления</div>
+  <div class="card">
+    <div class="row">
+      <span class="row__ico">📨</span>
+      <div class="row__body">
+        <div class="row__label">Копия входящих</div>
+        <div class="row__hint">Каждое входящее сообщение приходит сюда</div>
+      </div>
+      <label class="switch"><input type="checkbox" data-k="inbox"><span class="switch__track"></span><span class="switch__knob"></span></label>
+    </div>
+    <div class="row">
+      <span class="row__ico">🤖</span>
+      <div class="row__body">
+        <div class="row__label">Копия ответов</div>
+        <div class="row__hint">Показывать, что и как ответил бот</div>
+      </div>
+      <label class="switch"><input type="checkbox" data-k="notify"><span class="switch__track"></span><span class="switch__knob"></span></label>
+    </div>
+  </div>
+
+  <!-- 3. Как отвечать -->
+  <div class="section-title">Как отвечать</div>
+  <div class="card">
+    <div class="field">
+      <label class="field__label" for="persona">Указания для бота <span class="counter" id="personaCounter">0 / 800</span></label>
+      <textarea id="persona" data-k="persona" placeholder="Например: я занят до вечера, отвечай коротко и дружелюбно"></textarea>
+      <div class="field__hint">Добавляется к системному промпту каждого автоответа.</div>
+      <div class="presets">
+        <button class="preset" data-preset="Коротко и дружелюбно, без лишних деталей.">Коротко</button>
+        <button class="preset" data-preset="Официальный деловой тон, без эмодзи.">Деловой</button>
+        <button class="preset" data-preset="Я в отпуске, скажи, что отвечу сам после возвращения.">В отпуске</button>
+      </div>
+      <div style="margin-top:8px"><button class="btn-ghost danger" id="personaClear">Очистить</button></div>
+    </div>
+  </div>
+
+  <!-- 4. Поведение -->
+  <div class="section-title">Поведение</div>
+  <div class="card">
+    <div class="grid2">
+      <div class="field">
+        <label class="field__label" for="takeover">Пауза, мин</label>
+        <input type="number" id="takeover" data-k="takeover_minutes">
+        <div class="field__hint">После вашего сообщения в чате. 0 — без паузы.</div>
+      </div>
+      <div class="field">
+        <label class="field__label" for="maxReplies">Лимит ответов / час</label>
+        <input type="number" id="maxReplies" data-k="max_replies_per_hour">
+        <div class="field__hint">Защита от зацикливания</div>
+      </div>
+      <div class="field">
+        <label class="field__label" for="history">История, сообщений</label>
+        <input type="number" id="history" data-k="history_limit">
+        <div class="field__hint">Сколько реплик помнить</div>
+      </div>
+      <div class="field">
+        <label class="field__label" for="personaLimit">Лимит указаний</label>
+        <input type="number" id="personaLimit" data-k="persona_limit">
+        <div class="field__hint">Макс. символов persona</div>
+      </div>
+    </div>
+    <div class="field">
+      <label class="field__label" for="ownerName">Как к вам обращаться</label>
+      <input type="text" id="ownerName" data-k="owner_name">
+      <div class="field__hint">Используется в системном промпте вместо «владельца»</div>
+    </div>
+    <div class="field">
+      <label class="field__label" for="tz">Часовой пояс</label>
+      <select id="tz" data-k="timezone"></select>
+      <div class="field__hint">Подставляется в промпт как текущее местное время</div>
+    </div>
+  </div>
+
+  <!-- 5. Игнорируемые ID -->
+  <div class="section-title">Игнорируемые ID</div>
+  <div class="card">
+    <div class="field">
+      <div class="field__hint" style="margin:0 0 10px">Бот не отвечает этим пользователям (копия входящих всё равно приходит).</div>
+      <div class="chips" id="ignoreChips"></div>
+      <div class="inline-add">
+        <input type="number" id="ignoreInput" placeholder="Telegram ID, например 123456789" min="1">
+        <button class="btn-mini" id="ignoreAdd">Добавить</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 6. Каскад моделей -->
+  <div class="section-title">Каскад моделей</div>
+  <div class="card">
+    <div id="modelList"></div>
+    <div class="field">
+      <div class="field__hint" style="margin:0 0 9px">Порядок = приоритет. При квоте 429 бот переходит к следующей.</div>
+      <div class="inline-add">
+        <input type="text" id="modelInput" placeholder="gemini-3.1-flash-lite">
+        <button class="btn-mini" id="modelAdd">Добавить</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 7. Системное -->
+  <div class="section-title">Системное <span class="lock">🔒 только Render</span></div>
+  <div class="card" id="readonlyCard"></div>
+
+  <!-- 8. Проверить ИИ -->
+  <div class="section-title">Проверить ИИ</div>
+  <div class="card">
+    <div class="row">
+      <span class="row__ico">⚡</span>
+      <div class="row__body">
+        <div class="row__label">Тестовый запрос</div>
+        <div class="row__hint">Проверить ключ и каскад без собеседника</div>
+      </div>
+      <button class="btn-mini" id="testAi">Запустить</button>
+    </div>
+    <div class="result" id="aiResult">
+      <div class="result__head">Ответ модели</div>
+      <div id="aiResultText"></div>
+    </div>
+  </div>
+
+  <div style="height:12px"></div>
+</main>
+
+<div class="mainbutton-wrap" id="mbWrap">
+  <button class="mainbutton" id="saveBtn">Сохранить</button>
+</div>
+
+<div class="toast" id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

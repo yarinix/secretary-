@@ -1,2 +1,4 @@
 aiogram>=3.13,<4
 aiohttp>=3.9
+# zoneinfo на slim-образах без системной tzdata (часовые пояса в Mini App)
+tzdata>=2023.3
