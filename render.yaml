@@ -7,11 +7,30 @@ services:
     startCommand: python main.py
     healthCheckPath: /
     envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
       - key: BOT_TOKEN
         sync: false
       - key: OWNER_ID
         sync: false
+      # Историческое название: здесь лежит ключ GEMINI, Claude не подключён.
       - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODELS
+        sync: false
+      - key: OWNER_NAME
+        sync: false
+      - key: BOT_TIMEZONE
+        sync: false
+      - key: BUSINESS_TAKEOVER_MINUTES
+        sync: false
+      - key: BUSINESS_MAX_REPLIES_PER_HOUR
+        sync: false
+      - key: BUSINESS_IGNORE_IDS
         sync: false
       - key: WEBHOOK_SECRET
         generateValue: true
+      # RENDER_EXTERNAL_URL Render подставляет автоматически; при необходимости
+      # можно задать WEBHOOK_BASE_URL вручную (sync: false).
