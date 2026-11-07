@@ -8,6 +8,10 @@
   * system prompt не содержит имени собеседника (защита от инъекции через first_name);
   * в промпт возвращено текущее время (BOT_TIMEZONE).
 
+Mini App (/app): все настройки читаются из SQLite на КАЖДОЕ сообщение, поэтому
+смена «пауза 60 → 10 минут», лимитов, persona и списка моделей применяется без
+перезапуска. Env-переменные остаются слоем дефолтов.
+
 Имя переменной ANTHROPIC_API_KEY сохранено исторически: в ней лежит ключ Gemini,
 Claude не подключён. См. config.py.
 """
@@ -20,11 +24,19 @@ from collections import defaultdict, deque
 
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command, CommandObject
-from aiogram.types import BusinessConnection, Message
+from aiogram.types import (
+    BusinessConnection,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    MenuButtonWebApp,
+    Message,
+    WebAppInfo,
+)
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
 import config as cfg
+from app_settings import build_defaults, cascade_kwargs, load_state
 from helpers import (
     build_prompt,
     current_time_str,
@@ -34,6 +46,7 @@ from helpers import (
 )
 from llm import GeminiCascade
 from storage import Storage
+from webapp import register_webapp_routes
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("secretary")
@@ -41,17 +54,49 @@ log = logging.getLogger("secretary")
 bot = Bot(cfg.TOKEN)
 dp = Dispatcher()
 storage = Storage(cfg.DB_PATH)
-cascade = GeminiCascade(cfg.GEMINI_API_KEY, cfg.MODELS)
+
+# Дефолты из env. Значения из БД перекрывают их на каждом запросе.
+DEFAULTS = build_defaults(cfg)
 
 _connections: dict[str, dict] = storage.load_connections()
-_paused_until: dict[int, float] = {}
-_reply_times: dict[int, deque] = defaultdict(
-    lambda: deque(maxlen=cfg.MAX_REPLIES_PER_HOUR + 5)
-)
+# Храним НАЧАЛО паузы, а не дедлайн: тогда смена 60 → 10 минут применяется
+# к уже активной паузе, а не только к следующим.
+_paused_since: dict[int, float] = {}
+# Без фиксированного maxlen: лимит теперь настраивается на ходу.
+_reply_times: dict[int, deque] = defaultdict(deque)
 _warned_no_rights: set[str] = set()
 
 
+def _mask_secret(value: str) -> str:
+    if not value:
+        return "(не задан)"
+    if ":" in value:
+        head, tail = value.split(":", 1)
+        return f"{head}:{tail[:2]}••••••••••••"
+    return value[:4] + "••••••••"
+
+
+# В /api/state уходят ТОЛЬКО замаскированные значения; webapp дополнительно
+# фильтрует по белому списку. Полный ключ и токен не сериализуются вообще.
+READONLY_SNAPSHOT = {
+    "BOT_TOKEN": _mask_secret(cfg.TOKEN),
+    "OWNER_ID": cfg.OWNER_ID,
+    "WEBHOOK_SECRET": _mask_secret(cfg.WEBHOOK_SECRET),
+    "PORT": cfg.PORT,
+    "DB_PATH": cfg.DB_PATH,
+    "BASE_URL": cfg.BASE_URL or "(не задан)",
+    "APP_URL": cfg.APP_URL or "(не задан)",
+    "api_key_set": bool(cfg.GEMINI_API_KEY),
+}
+
+
 # ---------- хранилище (синхронный SQLite уводим из event loop) ----------
+
+async def rt() -> dict:
+    """Живое состояние настроек: один запрос к БД вместо 12 get_setting."""
+    rows = await asyncio.to_thread(storage.get_all_settings)
+    return load_state(rows, DEFAULTS)
+
 
 async def get_setting(key: str, default: str = "") -> str:
     return await asyncio.to_thread(storage.get_setting, key, default)
@@ -59,6 +104,39 @@ async def get_setting(key: str, default: str = "") -> str:
 
 async def set_setting(key: str, value: str) -> None:
     await asyncio.to_thread(storage.set_setting, key, value)
+
+
+def status_provider() -> dict:
+    """Живой статус для /api/state (синхронный: только память + быстрый SQLite)."""
+    state = load_state(storage.get_all_settings(), DEFAULTS)
+    connected = any(c["user_id"] == cfg.OWNER_ID and c["enabled"] for c in _connections.values())
+    can_reply = any(
+        c["user_id"] == cfg.OWNER_ID and c["enabled"] and c["can_reply"]
+        for c in _connections.values()
+    )
+    now = time.monotonic()
+    paused = sum(
+        1 for since in _paused_since.values()
+        if state["takeover_minutes"] > 0 and now - since < state["takeover_minutes"] * 60
+    )
+    hour_ago = now - 3600
+    replies = sum(sum(1 for t in q if t > hour_ago) for q in _reply_times.values())
+    return {
+        "connected": connected,
+        "can_reply": can_reply,
+        "paused_chats": paused,
+        "replies_last_hour": replies,
+        "takeover_minutes": state["takeover_minutes"],
+        "max_replies_per_hour": state["max_replies_per_hour"],
+    }
+
+
+async def test_ai_provider() -> str:
+    """Тестовый запрос к текущему каскаду из Mini App."""
+    state = await rt()
+    cascade = GeminiCascade(**cascade_kwargs(state, cfg.GEMINI_API_KEY))
+    system = build_prompt(state["owner_name"], state["persona"], current_time_str(state["timezone"]))
+    return await cascade.generate(system, [], "Ответь одним коротким предложением: ты на связи?")
 
 
 def connection_info(c: BusinessConnection) -> dict:
@@ -129,12 +207,22 @@ async def collect_media(m: Message) -> tuple[str, dict | None]:
         return text, None
 
 
-def rate_ok(chat_id: int) -> bool:
+def rate_ok(chat_id: int, limit: int) -> bool:
+    """Лимит берётся из живых настроек, а не из замороженного maxlen при импорте."""
     now = time.monotonic()
     times = _reply_times[chat_id]
     while times and now - times[0] > 3600:
         times.popleft()
-    return len(times) < cfg.MAX_REPLIES_PER_HOUR
+    while len(times) > limit + 5:
+        times.popleft()
+    return len(times) < limit
+
+
+def is_paused(chat_id: int, minutes: int) -> bool:
+    if minutes <= 0:
+        return False
+    since = _paused_since.get(chat_id)
+    return since is not None and time.monotonic() - since < minutes * 60
 
 
 # ---------- Business: подключение ----------
@@ -148,6 +236,7 @@ async def on_business_connection(c: BusinessConnection):
     _connections[c.id] = info
     await asyncio.to_thread(storage.save_connection, c.id, info)
     _warned_no_rights.discard(c.id)
+    state = await rt()
     if not info["enabled"]:
         await notify_owner(info, "🔌 Бот отключён от вашего аккаунта Telegram Business. Автоответы остановлены.")
     elif not info["can_reply"]:
@@ -157,13 +246,12 @@ async def on_business_connection(c: BusinessConnection):
             "Telegram для бизнеса → Чат-боты → «Отвечать на сообщения».",
         )
     else:
-        on = await get_setting("enabled", "1") == "1"
         await notify_owner(
             info,
             "🔌 Бот подключён к вашему аккаунту и будет отвечать в личных чатах от вашего лица "
-            f"(сейчас автоответы {'включены' if on else 'выключены'}).\n\n"
-            f"Управление: /business. Если вы сами напишете в чат, бот замолчит там на "
-            f"{cfg.TAKEOVER_MINUTES} мин.",
+            f"(сейчас автоответы {'включены' if state['enabled'] == '1' else 'выключены'}).\n\n"
+            f"Управление: /business или кнопка «Настройки». Если вы сами напишете в чат, "
+            f"бот замолчит там на {state['takeover_minutes']} мин.",
         )
 
 
@@ -182,17 +270,21 @@ async def on_business_message(m: Message):
 
     chat_id = m.chat.id
     sender = m.from_user
+    state = await rt()
 
     # Владелец сам пишет в чате: запоминаем и замолкаем. Пауза только на
     # осмысленное сообщение — стикер больше не выключает бота на час.
     if sender is None or sender.id == cfg.OWNER_ID:
         own_text = (m.text or m.caption or "").strip()
         if own_text:
-            await asyncio.to_thread(storage.save_message, chat_id, "model", own_text)
-            _paused_until[chat_id] = time.monotonic() + cfg.TAKEOVER_MINUTES * 60
+            await asyncio.to_thread(
+                storage.save_message, chat_id, "model", own_text,
+                max(40, state["history_limit"]),
+            )
+            _paused_since[chat_id] = time.monotonic()
         return
 
-    if sender.is_bot or sender.id in cfg.IGNORE_IDS:
+    if sender.is_bot or sender.id in state["ignore_ids"]:
         return
 
     text, media = await collect_media(m)
@@ -204,15 +296,18 @@ async def on_business_message(m: Message):
 
     # P1: копия КАЖДОГО входящего приходит владельцу независимо от того,
     # ответит бот или нет (выключено, пауза, лимит, нет прав, нет ключа).
-    if await get_setting("inbox", "1") == "1":
+    if state["inbox"] == "1":
         await notify_owner(info, f"📨 {name}: «{label[:300]}»")
 
-    history = await asyncio.to_thread(storage.get_history, chat_id, cfg.HISTORY_LIMIT)
-    await asyncio.to_thread(storage.save_message, chat_id, "user", f"{name}: {label}")
+    history = await asyncio.to_thread(storage.get_history, chat_id, state["history_limit"])
+    await asyncio.to_thread(
+        storage.save_message, chat_id, "user", f"{name}: {label}",
+        max(40, state["history_limit"]),
+    )
 
-    if await get_setting("enabled", "1") != "1":
+    if state["enabled"] != "1":
         return
-    if _paused_until.get(chat_id, 0) > time.monotonic():
+    if is_paused(chat_id, state["takeover_minutes"]):
         return
     if not info["can_reply"]:
         if conn_id not in _warned_no_rights:
@@ -222,17 +317,19 @@ async def on_business_message(m: Message):
                 "Настройки → Telegram для бизнеса → Чат-боты."
             )
         return
-    if not rate_ok(chat_id):
+    if not rate_ok(chat_id, state["max_replies_per_hour"]):
         log.info("лимит ответов в час для чата %s", chat_id)
         return
 
-    persona = await get_setting("persona", "")
-    system = build_prompt(cfg.OWNER_NAME, persona, current_time_str(cfg.BOT_TIMEZONE))
+    system = build_prompt(state["owner_name"], state["persona"], current_time_str(state["timezone"]))
     try:
         await bot.send_chat_action(chat_id, "typing", business_connection_id=conn_id)
     except Exception:
         pass
 
+    # GeminiCascade не хранит состояние — собираем его из текущих настроек,
+    # поэтому смена списка моделей в Mini App действует сразу.
+    cascade = GeminiCascade(**cascade_kwargs(state, cfg.GEMINI_API_KEY))
     try:
         reply = await cascade.generate(system, history, f"{name}: {label}", media)
     except Exception as e:
@@ -258,24 +355,31 @@ async def on_business_message(m: Message):
         return
 
     _reply_times[chat_id].append(time.monotonic())
-    await asyncio.to_thread(storage.save_message, chat_id, "model", reply)
-    if await get_setting("notify", "1") == "1":
+    await asyncio.to_thread(
+        storage.save_message, chat_id, "model", reply, max(40, state["history_limit"])
+    )
+    if state["notify"] == "1":
         await notify_owner(info, f"🤖 Ответил за вас ({name}):\n«{label[:300]}»\n→ «{reply[:500]}»")
 
 
 # ---------- Команды владельца ----------
 
-BUSINESS_HELP = (
-    "🤖 Автоответы от вашего лица (Telegram Business)\n\n"
-    "/business on | off — включить или выключить автоответы\n"
-    "/business inbox on | off — присылать копию каждого входящего\n"
-    "/business notify on | off — присылать копию каждого ответа\n"
-    "/business persona <текст> — как отвечать (тон, что можно и нельзя)\n"
-    "/business persona clear — убрать указания\n"
-    "/business status — текущие настройки\n\n"
-    "Подключить: Telegram → Настройки → Telegram для бизнеса → Чат-боты (нужен Premium). "
-    f"Если вы сами напишете в чат, бот замолчит там на {cfg.TAKEOVER_MINUTES} мин."
-)
+async def business_help() -> str:
+    state = await rt()
+    text = (
+        "🤖 Автоответы от вашего лица (Telegram Business)\n\n"
+        "/business on | off — включить или выключить автоответы\n"
+        "/business inbox on | off — присылать копию каждого входящего\n"
+        "/business notify on | off — присылать копию каждого ответа\n"
+        "/business persona <текст> — как отвечать (тон, что можно и нельзя)\n"
+        "/business persona clear — убрать указания\n"
+        "/business status — текущие настройки\n\n"
+        "Подключить: Telegram → Настройки → Telegram для бизнеса → Чат-боты (нужен Premium). "
+        f"Если вы сами напишете в чат, бот замолчит там на {state['takeover_minutes']} мин."
+    )
+    if cfg.APP_URL:
+        text += "\n\n⚙️ Все настройки (пауза, лимиты, persona, модели) удобнее менять в Mini App — кнопка «Настройки» в меню бота."
+    return text
 
 
 @dp.message(Command("start"))
@@ -283,7 +387,14 @@ async def start(m: Message):
     # Владелец НЕ назначается здесь: только OWNER_ID из окружения.
     if not m.from_user or m.from_user.id != cfg.OWNER_ID:
         return
-    await m.answer(BUSINESS_HELP + f"\n\nВаш ID: {m.from_user.id}")
+    keyboard = None
+    if cfg.APP_URL and m.chat.type == "private" and not getattr(m, "business_connection_id", None):
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[[
+                InlineKeyboardButton(text="⚙️ Настройки", web_app=WebAppInfo(url=cfg.APP_URL))
+            ]]
+        )
+    await m.answer(await business_help() + f"\n\nВаш ID: {m.from_user.id}", reply_markup=keyboard)
 
 
 @dp.message(Command("business"))
@@ -293,6 +404,7 @@ async def cmd_business(m: Message, command: CommandObject):
     args = (command.args or "").strip()
     head, _, rest = args.partition(" ")
     head, rest = head.lower(), rest.strip()
+    state = await rt()
     connected = any(c["user_id"] == cfg.OWNER_ID and c["enabled"] for c in _connections.values())
 
     if head in ("on", "off"):
@@ -311,10 +423,10 @@ async def cmd_business(m: Message, command: CommandObject):
             await set_setting("persona", "")
             await m.answer("Указания убраны.")
         elif rest:
-            await set_setting("persona", rest[:cfg.PERSONA_LIMIT])
+            await set_setting("persona", rest[: state["persona_limit"]])
             await m.answer("✅ Указания сохранены. Они учитываются в каждом автоответе.")
         else:
-            current = await get_setting("persona", "")
+            current = state["persona"]
             await m.answer(
                 f"Сейчас: {current}" if current else
                 "Указаний нет. Пример: /business persona Я занят до вечера, отвечай коротко и дружелюбно."
@@ -322,15 +434,19 @@ async def cmd_business(m: Message, command: CommandObject):
     elif head == "status":
         await m.answer(
             f"Подключение: {'да' if connected else 'нет'}\n"
-            f"Автоответы: {'включены' if await get_setting('enabled', '1') == '1' else 'выключены'}\n"
-            f"Копии входящих: {'да' if await get_setting('inbox', '1') == '1' else 'нет'}\n"
-            f"Копии ответов: {'да' if await get_setting('notify', '1') == '1' else 'нет'}\n"
-            f"Каскад Gemini: {cascade.describe()}\n"
-            f"Игнорируемые ID: {', '.join(map(str, sorted(cfg.IGNORE_IDS))) or 'нет'}\n"
-            f"Указания: {await get_setting('persona', '') or 'нет'}"
+            f"Автоответы: {'включены' if state['enabled'] == '1' else 'выключены'}\n"
+            f"Копии входящих: {'да' if state['inbox'] == '1' else 'нет'}\n"
+            f"Копии ответов: {'да' if state['notify'] == '1' else 'нет'}\n"
+            f"Каскад Gemini: {', '.join(state['models'])}\n"
+            f"Ключ Gemini: {'задан' if cfg.GEMINI_API_KEY else 'НЕ задан'}\n"
+            f"Пауза: {state['takeover_minutes']} мин · Лимит: {state['max_replies_per_hour']}/час\n"
+            f"История: {state['history_limit']} · Часовой пояс: {state['timezone']}\n"
+            f"Игнорируемые ID: {', '.join(map(str, state['ignore_ids'])) or 'нет'}\n"
+            f"Указания: {state['persona'] or 'нет'}\n"
+            f"Mini App: {cfg.APP_URL or 'не настроен'}"
         )
     else:
-        await m.answer(BUSINESS_HELP)
+        await m.answer(await business_help())
 
 
 # ---------- запуск ----------
@@ -350,6 +466,20 @@ async def on_startup(app: web.Application):
             "бот не будет получать обновления. Задайте переменную в Render."
         )
 
+    # Кнопка меню — отдельный try: её отсутствие не должно ронять запуск бота.
+    if cfg.APP_URL:
+        try:
+            await bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(
+                    text="Настройки", web_app=WebAppInfo(url=cfg.APP_URL)
+                )
+            )
+            log.info("кнопка меню Mini App установлена: %s", cfg.APP_URL)
+        except Exception as e:
+            log.warning("не удалось установить кнопку меню Mini App: %s", type(e).__name__)
+    else:
+        log.warning("APP_URL пуст — кнопка меню Mini App пропущена, /app доступен по домену")
+
 
 async def health(_):
     return web.Response(text="ok")
@@ -360,6 +490,16 @@ def main():
     app.router.add_get("/", health)
     SimpleRequestHandler(dp, bot, secret_token=cfg.WEBHOOK_SECRET).register(app, path=cfg.WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
+    register_webapp_routes(
+        app,
+        bot_token=cfg.TOKEN,
+        owner_id=cfg.OWNER_ID,
+        storage=storage,
+        defaults=DEFAULTS,
+        status_provider=status_provider,
+        readonly=READONLY_SNAPSHOT,
+        test_ai_provider=test_ai_provider,
+    )
     app.on_startup.append(on_startup)
     web.run_app(app, host="0.0.0.0", port=cfg.PORT)
 

@@ -54,5 +54,13 @@ BASE_URL = (
 ).rstrip("/")
 PORT = int(os.environ.get("PORT", "10000"))
 
+# Mini App живёт на том же домене, что и вебхук. На проде Render подставляет
+# RENDER_EXTERNAL_URL автоматически → https://secretary-bot-htem.onrender.com/app.
+# WEBAPP_URL нужен только если BASE_URL не задан (например, кастомный домен).
+APP_PATH = "/app"
+APP_URL = (
+    os.environ.get("WEBAPP_URL") or (BASE_URL + APP_PATH if BASE_URL else "")
+).strip().rstrip("/")
+
 HISTORY_LIMIT = 12
 PERSONA_LIMIT = 800
