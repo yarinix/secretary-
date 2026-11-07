@@ -43,6 +43,13 @@ MAX_REPLIES_PER_HOUR = int(os.environ.get("BUSINESS_MAX_REPLIES_PER_HOUR", "20")
 IGNORE_IDS = {int(x) for x in re.findall(r"\d+", os.environ.get("BUSINESS_IGNORE_IDS", ""))}
 
 DB_PATH = os.environ.get("DB_PATH", "secretary.db")
+
+# Внешняя БД (Supabase / Neon / Render Postgres). Если задана — настройки,
+# история и подключения живут вне эфемерного диска Render Free и переживают
+# рестарт/сон. Если пусто — локальный SQLite (совместимость, но данные сбросятся).
+# DSN содержит пароль: никуда не логируется и не отдаётся в Mini App.
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+
 # Раньше секрет по умолчанию был «change-me» — зная его, можно было подделать
 # апдейты. Теперь при отсутствии переменной берём непредсказуемый хэш токена.
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET") or hashlib.sha256(

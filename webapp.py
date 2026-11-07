@@ -2,6 +2,7 @@
 
 Подключаются к ТЕМ ЖЕ aiohttp-приложению, что и webhook aiogram:
   GET  /             -> "ok" (health, регистрируется в main.py)
+  GET  /health       -> "ok" для внешнего мониторинга (без БД и авторизации)
   POST /webhook      -> aiogram (регистрируется в main.py)
   GET  /app          -> HTML Mini App
   GET  /static/{name}-> app.css / app.js
@@ -84,7 +85,8 @@ def _safe_readonly(readonly: dict | None) -> dict:
             out[key] = bool(value)
         elif key in ("PORT", "OWNER_ID"):
             out[key] = value
-        elif key in ("BASE_URL", "APP_URL", "DB_PATH"):
+        elif key in ("BASE_URL", "APP_URL", "DB_PATH", "STORAGE_BACKEND"):
+            # STORAGE_BACKEND — готовая безопасная строка, а не DSN.
             out[key] = str(value)
         else:
             out[key] = _mask(value)
@@ -234,6 +236,12 @@ def register_webapp_routes(
             return _fail(502, "Каскад моделей не ответил. Проверьте ключ и список моделей.")
         return _json({"ok": True, "reply": str(result)[:1000]})
 
+    async def health_probe(_: web.Request) -> web.Response:
+        # Ни БД, ни авторизации: внешний мониторинг должен получать 200 даже
+        # когда Postgres недоступен, иначе он решит, что сервис упал.
+        return web.Response(text="ok", headers=NO_STORE)
+
+    app.router.add_get("/health", health_probe)
     app.router.add_get("/app", serve_app)
     app.router.add_get("/static/{name}", serve_static)
     app.router.add_post("/api/state", api_state)

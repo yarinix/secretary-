@@ -14,6 +14,11 @@ Mini App (/app): все настройки читаются из SQLite на К�
 
 Имя переменной ANTHROPIC_API_KEY сохранено исторически: в ней лежит ключ Gemini,
 Claude не подключён. См. config.py.
+
+Устойчивость на Render Free: при заданном DATABASE_URL хранилище — внешний
+Postgres (настройки переживают рестарт), иначе локальный SQLite (сбросятся).
+drop_pending_updates=False, дедуп update_id и внешний ping /health не дают
+потерять сообщения на холодном старте. Подробности — в README.
 """
 
 import asyncio
@@ -22,7 +27,7 @@ import logging
 import time
 from collections import defaultdict, deque
 
-from aiogram import Bot, Dispatcher
+from aiogram import BaseMiddleware, Bot, Dispatcher
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
     BusinessConnection,
@@ -37,6 +42,7 @@ from aiohttp import web
 
 import config as cfg
 from app_settings import build_defaults, cascade_kwargs, load_state
+from dedup import DedupGuard
 from helpers import (
     build_prompt,
     current_time_str,
@@ -53,7 +59,46 @@ log = logging.getLogger("secretary")
 
 bot = Bot(cfg.TOKEN)
 dp = Dispatcher()
-storage = Storage(cfg.DB_PATH)
+
+# Повторная доставка webhook-обновления не должна давать второй автоответ.
+# Регистрируем ДО обработчиков: outer-middleware обёртывает все типы updates.
+class _DedupMiddleware(BaseMiddleware):
+    def __init__(self, guard: DedupGuard) -> None:
+        self.guard = guard
+
+    async def __call__(self, handler, event, data):
+        uid = getattr(event, "update_id", None)
+        if uid is not None and self.guard.is_duplicate(uid):
+            log.info("дубль update_id=%s проигнорирован", uid)
+            return
+        return await handler(event, data)
+
+
+_DEDUP = DedupGuard()
+dp.update.outer_middleware.register(_DedupMiddleware(_DEDUP))
+
+# Эфемерный диск Render Free теряет secretary.db при рестарте/сне. Внешняя БД
+# живёт отдельно от сервиса, поэтому при заданном DATABASE_URL используем её.
+if cfg.DATABASE_URL:
+    try:
+        from pg_storage import PgStorage  # noqa: PLC0415 (драйвер нужен только здесь)
+        storage = PgStorage(cfg.DATABASE_URL)
+        STORAGE_BACKEND = "Postgres (устойчиво)"
+        log.info("хранилище: внешний Postgres — настройки переживут рестарт")
+    except Exception as e:
+        # Не пишем в лог DSN и текст ошибки: там может быть хост и пароль.
+        log.error("не удалось подключиться к Postgres: %s", type(e).__name__)
+        raise SystemExit(
+            "DATABASE_URL задан, но подключиться не удалось. "
+            "Проверьте DSN, sslmode и доступность БД."
+        ) from None
+else:
+    storage = Storage(cfg.DB_PATH)
+    STORAGE_BACKEND = "SQLite (временный — сбросится при рестарте)"
+    log.warning(
+        "хранилище: локальный SQLite. На Render Free настройки СБРОСЯТСЯ при "
+        "рестарте/сне — задайте DATABASE_URL."
+    )
 
 # Дефолты из env. Значения из БД перекрывают их на каждом запросе.
 DEFAULTS = build_defaults(cfg)
@@ -86,6 +131,7 @@ READONLY_SNAPSHOT = {
     "DB_PATH": cfg.DB_PATH,
     "BASE_URL": cfg.BASE_URL or "(не задан)",
     "APP_URL": cfg.APP_URL or "(не задан)",
+    "STORAGE_BACKEND": STORAGE_BACKEND,
     "api_key_set": bool(cfg.GEMINI_API_KEY),
 }
 
@@ -128,6 +174,7 @@ def status_provider() -> dict:
         "replies_last_hour": replies,
         "takeover_minutes": state["takeover_minutes"],
         "max_replies_per_hour": state["max_replies_per_hour"],
+        "persistent_storage": bool(cfg.DATABASE_URL),
     }
 
 
@@ -453,11 +500,14 @@ async def cmd_business(m: Message, command: CommandObject):
 
 async def on_startup(app: web.Application):
     if cfg.BASE_URL:
+        # False — принципиально. Render Free поднимается ≈1 минуту и может
+        # рестартовать в любой момент; с True мы бы сами вычищали очередь
+        # Telegram, которая ещё должна доехать после холодного старта.
         await bot.set_webhook(
             cfg.BASE_URL + cfg.WEBHOOK_PATH,
             secret_token=cfg.WEBHOOK_SECRET,
             allowed_updates=dp.resolve_used_update_types(),
-            drop_pending_updates=True,
+            drop_pending_updates=False,
         )
         log.info("вебхук установлен: %s%s", cfg.BASE_URL, cfg.WEBHOOK_PATH)
     else:
@@ -488,7 +538,14 @@ async def health(_):
 def main():
     app = web.Application()
     app.router.add_get("/", health)
-    SimpleRequestHandler(dp, bot, secret_token=cfg.WEBHOOK_SECRET).register(app, path=cfg.WEBHOOK_PATH)
+    # Явно фиксируем поведение aiogram: вебхук сразу отвечает Telegram 200, а
+    # обработчик (включая вызов Gemini) уходит в фон. Иначе Telegram мог бы
+    # счесть запрос неуспешным и прислать тот же update повторно.
+    SimpleRequestHandler(
+        dp, bot,
+        secret_token=cfg.WEBHOOK_SECRET,
+        handle_in_background=True,
+    ).register(app, path=cfg.WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
     register_webapp_routes(
         app,
