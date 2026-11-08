@@ -233,6 +233,15 @@ class Storage:
             out["duplicate"] = False
             return out
 
+    def set_due_now(self, chat_id: int, now: float) -> bool:
+        """Кнопка «Ответить сейчас»: дедлайн пачки = сейчас. Захваченную не трогаем."""
+        with self._lock, self.db:
+            cur = self.db.execute(
+                "UPDATE secretary_pending SET due_at=? WHERE chat_id=? AND claimed_at IS NULL",
+                (float(now), chat_id),
+            )
+        return cur.rowcount > 0
+
     def set_notify_message_id(self, chat_id: int, message_id: int | None) -> None:
         with self._lock, self.db:
             self.db.execute(

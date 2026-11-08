@@ -20,6 +20,14 @@
   * тумблер `smart_replies=0` возвращает мгновенные ответы (дедлайн = now,
     пачка подбирается тем же воркером без отдельной ветки кода).
 
+Ответ не нужен и кнопки:
+  * модель сама отвечает меткой [[NO_REPLY]] на «спасибо», «ок», эмодзи и т. п.
+    (настройка skip_unneeded); метка собеседнику не уходит никогда;
+  * под уведомлением 📨 три кнопки: «Не отвечать» (отменить пачку), «Ответить
+    сейчас» и «Заглушить на 3 ч» (чат игнорируется, пока не истечёт срок);
+  * любое исходящее сообщение владельца (голосовое, фото, стикер) отменяет пачку;
+  * перед отправкой проверяется токен захвата: ответ на устаревшую пачку не уходит.
+
 Mini App (/app): настройки читаются из БД на каждом сообщении и на доставке,
 поэтому смена чисел, persona и списка моделей применяется без перезапуска.
 Env-переменные остаются слоем дефолтов.
@@ -40,10 +48,11 @@ import logging
 import time
 from collections import defaultdict, deque
 
-from aiogram import BaseMiddleware, Bot, Dispatcher
+from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
     BusinessConnection,
+    CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     MenuButtonWebApp,
@@ -284,60 +293,113 @@ async def get_connection(connection_id: str):
     return info
 
 
-async def notify_owner(info: dict, text: str):
+async def notify_owner(info: dict, text: str, markup=None):
     """Возвращает Message | None (нужен message_id для редактирования)."""
     try:
-        return await bot.send_message(info["user_chat_id"], text)
+        if markup is None:
+            return await bot.send_message(info["user_chat_id"], text)
+        return await bot.send_message(info["user_chat_id"], text, reply_markup=markup)
     except Exception as e:
         log.warning("не удалось написать владельцу: %s", type(e).__name__)
         return None
 
 
-async def _send_or_edit(info: dict, text: str, message_id: int | None) -> int | None:
+async def _send_or_edit(
+    info: dict, text: str, message_id: int | None, markup=None
+) -> int | None:
     """Одно редактируемое уведомление на пачку вместо копии каждого сообщения."""
     chat = info["user_chat_id"]
     if message_id:
+        # Правка без reply_markup убирает кнопки, поэтому передаём их каждый раз.
+        kw = {"reply_markup": markup} if markup is not None else {}
         try:
-            await bot.edit_message_text(text, chat_id=chat, message_id=message_id)
+            await bot.edit_message_text(text, chat_id=chat, message_id=message_id, **kw)
             return int(message_id)
         except Exception as e:
             if "not modified" in str(e).lower():
                 return int(message_id)
             # MessageIdInvalid и прочее -> шлём новое сообщение.
             log.info("уведомление не отредактировано, шлём новое: %s", type(e).__name__)
-    msg = await notify_owner(info, text)
+    msg = await notify_owner(info, text, markup)
     return int(msg.message_id) if msg is not None else None
 
 
-async def _mark_notification(row: dict, info: dict, text: str) -> None:
+async def _mark_notification(row: dict, info: dict, text: str, markup=None) -> None:
+    """Финальная пометка уведомления. Без ``markup`` кнопки под ним исчезают."""
     mid = row.get("notify_message_id")
     if not mid:
         return
+    kw = {"reply_markup": markup} if markup is not None else {}
     try:
-        await bot.edit_message_text(text, chat_id=info["user_chat_id"], message_id=mid)
+        await bot.edit_message_text(text, chat_id=info["user_chat_id"], message_id=mid, **kw)
     except Exception as e:
         if "not modified" not in str(e).lower():
             log.info("не удалось пометить уведомление: %s", type(e).__name__)
 
 
-def _batch_notification_text(row: dict) -> str:
-    parts = row.get("parts") or []
+def _batch_lines(parts: list) -> str:
     shown = parts[-4:]
     lines = "\n".join(f"«{str(p)[:160]}»" for p in shown)
     hidden = len(parts) - len(shown)
     if hidden > 0:
         lines += f"\n… и ещё {hidden}"
+    return lines
+
+
+def _batch_notification_text(row: dict) -> str:
+    parts = row.get("parts") or []
     secs = max(0, int(float(row.get("due_at") or 0) - time.time()))
     return (
-        f"📨 Сообщений в пачке: {len(parts)}\n{lines}\n\n"
+        f"📨 Сообщений в пачке: {len(parts)}\n{_batch_lines(parts)}\n\n"
         f"⏳ Ответ примерно через {secs} сек, если вы не ответите сами."
     )
+
+
+def _with_batch(row: dict, status: str) -> str:
+    """Итог по пачке, но с её текстом: владелец нажал кнопку, чтобы не отвечать,
+    и должен по-прежнему видеть, что именно ему написали."""
+    parts = row.get("parts") or []
+    return f"📨 Сообщений: {len(parts)}\n{_batch_lines(parts)}\n\n{status}"
+
+
+# ---------- кнопки под уведомлением ----------
+
+def _inbox_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="🙈 Не отвечать", callback_data=policy.make_callback("skip", chat_id)
+            ),
+            InlineKeyboardButton(
+                text="⚡ Ответить сейчас", callback_data=policy.make_callback("now", chat_id)
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"🔕 Заглушить на {policy.MUTE_HOURS} ч",
+                callback_data=policy.make_callback("mute", chat_id),
+            ),
+        ],
+    ])
+
+
+def _unmute_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="🔔 Включить снова", callback_data=policy.make_callback("unmute", chat_id)
+        ),
+    ]])
 
 
 async def _upsert_inbox_notification(row: dict, info: dict, state: dict) -> None:
     if state["inbox"] != "1":
         return
-    mid = await _send_or_edit(info, _batch_notification_text(row), row.get("notify_message_id"))
+    mid = await _send_or_edit(
+        info,
+        _batch_notification_text(row),
+        row.get("notify_message_id"),
+        _inbox_keyboard(int(row["chat_id"])),
+    )
     if mid and mid != row.get("notify_message_id"):
         await asyncio.to_thread(storage.set_notify_message_id, int(row["chat_id"]), mid)
 
@@ -443,6 +505,7 @@ async def _deliver(row: dict) -> None:
         state["persona"],
         current_time_str(state["timezone"]),
         night_instruction,
+        allow_skip=state["skip_unneeded"] == "1",
     )
     media = await _fetch_media(row)
 
@@ -463,6 +526,31 @@ async def _deliver(row: dict) -> None:
     if not reply:
         if int(row.get("attempts") or 0) >= 3:
             await _drop_batch(row, info, "⚠️ Пустой ответ модели — ответьте сами")
+        return
+
+    # Пока модель думала (до минуты), пачку могли отменить кнопкой, ответом
+    # владельца или перехватить повторно, либо пришло новое сообщение и пачка
+    # пересоздалась. Токен захвата изменился, значит этот ответ устарел: ничего
+    # не шлём. Новая пачка (старые + новые сообщения) уйдёт одним ответом позже,
+    # поэтому на уже отвеченное повторно не отвечаем.
+    current = await asyncio.to_thread(storage.get_pending, chat_id)
+    if not current or current.get("claim_token") != row.get("claim_token"):
+        log.info(
+            "пачка chat_id=%s изменилась или отменена, пока готовился ответ: не отправляю",
+            chat_id,
+        )
+        return
+
+    if policy.is_no_reply(reply):
+        # Модель решила промолчать. Метку НИКОГДА не отправляем собеседнику, даже
+        # если настройка выключена, а модель всё равно её написала.
+        log.info("chat_id=%s: ответ не нужен, молчим", chat_id)
+        keep = max(40, state["history_limit"])
+        await asyncio.to_thread(storage.save_message, chat_id, "user", batch_text, keep)
+        await _drop_batch(
+            row, info,
+            _with_batch(row, "🤐 Ответ не нужен — промолчал. Если нужно, ответьте сами."),
+        )
         return
 
     try:
@@ -602,27 +690,37 @@ async def on_business_message(m: Message):
 
     # --- владелец написал сам -------------------------------------------------
     if sender is None or sender.id == cfg.OWNER_ID:
+        # ЛЮБОЕ исходящее сообщение владельца (текст, голосовое, кружок, фото,
+        # стикер) значит «я здесь и ответил сам». Раньше считался только текст, и
+        # бот отвечал после того, как вы уже ответили голосовым.
+        # Присутствие ГЛОБАЛЬНОЕ: время последнего ИСХОДЯЩЕГО сообщения
+        # владельца в любом подключённом Business-чате. Telegram Business
+        # не даёт реальный online-статус, это единственный доступный сигнал.
         own_text = (m.text or m.caption or "").strip()
+        await asyncio.to_thread(storage.set_meta, "last_owner_at", repr(time.time()))
+        cancelled = await asyncio.to_thread(storage.cancel_pending, chat_id)
+        keep = max(40, state["history_limit"])
+        if cancelled and cancelled.get("parts"):
+            await asyncio.to_thread(
+                storage.save_message, chat_id, "user",
+                policy.build_batch_text(cancelled["parts"]), keep,
+            )
         if own_text:
-            # Присутствие ГЛОБАЛЬНОЕ: время последнего ИСХОДЯЩЕГО сообщения
-            # владельца в любом подключённом Business-чате. Telegram Business
-            # не даёт реальный online-статус, это единственный доступный сигнал.
-            await asyncio.to_thread(storage.set_meta, "last_owner_at", repr(time.time()))
-            cancelled = await asyncio.to_thread(storage.cancel_pending, chat_id)
-            keep = max(40, state["history_limit"])
-            if cancelled and cancelled.get("parts"):
-                await asyncio.to_thread(
-                    storage.save_message, chat_id, "user",
-                    policy.build_batch_text(cancelled["parts"]), keep,
-                )
             await asyncio.to_thread(storage.save_message, chat_id, "model", own_text, keep)
-            if cancelled:
-                await _mark_notification(
-                    cancelled, info, "✅ Вы ответили сами — автоответ отменён"
-                )
+        if cancelled:
+            await _mark_notification(
+                cancelled, info,
+                _with_batch(cancelled, "✅ Вы ответили сами — автоответ отменён"),
+            )
         return
 
     if sender.is_bot or sender.id in state["ignore_ids"]:
+        return
+
+    # Чат заглушён кнопкой «Заглушить»: бот молчит и уведомлений не шлёт.
+    if policy.is_muted(
+        await asyncio.to_thread(storage.get_meta, f"mute:{chat_id}"), time.time()
+    ):
         return
 
     text = (m.text or m.caption or "").strip()
@@ -675,6 +773,92 @@ async def on_business_message(m: Message):
         await process_due()
 
 
+# ---------- кнопки: «Не отвечать» / «Ответить сейчас» / «Заглушить» ----------
+
+async def _cb_answer(q: CallbackQuery, text: str = "", alert: bool = False) -> None:
+    try:
+        await q.answer(text, show_alert=alert)
+    except Exception as e:
+        log.info("не удалось ответить на нажатие: %s", type(e).__name__)
+
+
+async def _cb_edit(q: CallbackQuery, text: str, markup=None) -> None:
+    """Правит уведомление, под которым нажали кнопку. Без ``markup`` кнопки уходят."""
+    msg = getattr(q, "message", None)
+    mid = getattr(msg, "message_id", None)
+    if not mid:
+        return
+    chat = getattr(getattr(msg, "chat", None), "id", None) or q.from_user.id
+    kw = {"reply_markup": markup} if markup is not None else {}
+    try:
+        await bot.edit_message_text(text, chat_id=chat, message_id=mid, **kw)
+    except Exception as e:
+        if "not modified" not in str(e).lower():
+            log.info("не удалось обновить уведомление: %s", type(e).__name__)
+
+
+async def _remember_batch(chat_id: int, cancelled: dict | None, keep: int) -> None:
+    """Отменённую пачку кладём в историю: модель помнит, что собеседник писал."""
+    if cancelled and cancelled.get("parts"):
+        await asyncio.to_thread(
+            storage.save_message, chat_id, "user",
+            policy.build_batch_text(cancelled["parts"]), keep,
+        )
+
+
+@dp.callback_query(F.data.startswith(policy.CALLBACK_PREFIX + ":"))
+async def on_button(q: CallbackQuery):
+    # Кнопки видит только владелец, но callback_data можно подделать запросом
+    # к Bot API от чужого аккаунта, поэтому проверяем отправителя явно.
+    if not q.from_user or q.from_user.id != cfg.OWNER_ID:
+        await _cb_answer(q, "Только для владельца", True)
+        return
+    parsed = policy.parse_callback(q.data)
+    if parsed is None:
+        await _cb_answer(q)
+        return
+    action, chat_id = parsed
+    state = await rt()
+    keep = max(40, state["history_limit"])
+
+    if action == "skip":
+        cancelled = await asyncio.to_thread(storage.cancel_pending, chat_id)
+        if not cancelled:
+            await _cb_answer(q, "Уже обработано")
+            return
+        await _remember_batch(chat_id, cancelled, keep)
+        await _cb_answer(q, "Не отвечаю")
+        await _cb_edit(q, _with_batch(cancelled, "🙈 Отвечать не буду"))
+
+    elif action == "now":
+        due = await asyncio.to_thread(storage.set_due_now, chat_id, time.time())
+        # Отвечаем на нажатие СРАЗУ: Telegram держит спиннер на кнопке, а
+        # генерация ответа может занять десятки секунд.
+        await _cb_answer(q, "Отвечаю сейчас…" if due else "Уже обработано")
+        if due:
+            await process_due()
+
+    elif action == "mute":
+        until = policy.mute_until(time.time())
+        await asyncio.to_thread(storage.set_meta, f"mute:{chat_id}", repr(until))
+        cancelled = await asyncio.to_thread(storage.cancel_pending, chat_id)
+        await _remember_batch(chat_id, cancelled, keep)
+        until_txt = policy.local_time(until, state["timezone"]).strftime("%H:%M")
+        status = f"🔕 Чат заглушён до {until_txt}: бот в нём молчит."
+        if cancelled:
+            text = _with_batch(cancelled, status)
+        else:
+            prev = getattr(getattr(q, "message", None), "text", None)
+            text = f"{prev}\n\n{status}" if prev else status
+        await _cb_answer(q, f"Заглушён до {until_txt}")
+        await _cb_edit(q, text, _unmute_keyboard(chat_id))
+
+    elif action == "unmute":
+        await asyncio.to_thread(storage.set_meta, f"mute:{chat_id}", "0")
+        await _cb_answer(q, "Бот снова отвечает")
+        await _cb_edit(q, "🔔 Заглушение снято: бот снова отвечает в этом чате.")
+
+
 # ---------- Команды владельца ----------
 
 async def business_help() -> str:
@@ -684,6 +868,7 @@ async def business_help() -> str:
         "/business on | off — включить или выключить автоответы\n"
         "/business inbox on | off — присылать копию входящих\n"
         "/business notify on | off — присылать копию каждого ответа\n"
+        "/business skip on | off — молчать, если ответ не нужен («спасибо», «ок», эмодзи)\n"
         "/business persona <текст> — как отвечать (тон, что можно и нельзя)\n"
         "/business persona clear — убрать указания\n"
         "/business status — текущие настройки и очередь\n\n"
@@ -691,7 +876,8 @@ async def business_help() -> str:
         f"Ответ приходит не сразу: жду {state['reply_delay_minutes']} мин тишины, "
         f"а при отсутствии больше {state['away_minutes']} мин собираю пачку за "
         f"{state['away_collect_seconds']} сек и отвечаю один раз. "
-        "Если вы ответите сами — автоответ отменяется."
+        "Если вы ответите сами (текстом, голосовым или фото) — автоответ отменяется. "
+        "Под уведомлением 📨 есть кнопки: «Не отвечать», «Ответить сейчас», «Заглушить чат»."
     )
     if cfg.APP_URL:
         text += "\n\n⚙️ Все настройки удобнее менять в Mini App — кнопка «Настройки» в меню бота."
@@ -734,6 +920,12 @@ async def cmd_business(m: Message, command: CommandObject):
             f"🔔 Копии {what} будут приходить сюда." if rest.lower() == "on"
             else f"🔕 Копии {what} отключены."
         )
+    elif head == "skip" and rest.lower() in ("on", "off"):
+        await set_setting("skip_unneeded", "1" if rest.lower() == "on" else "0")
+        await m.answer(
+            "🤐 Буду молчать, если ответ не нужен." if rest.lower() == "on"
+            else "💬 Буду отвечать на всё."
+        )
     elif head == "persona":
         if rest.lower() in ("clear", "очистить", "-"):
             await set_setting("persona", "")
@@ -758,6 +950,7 @@ async def cmd_business(m: Message, command: CommandObject):
             f"Подключение: {'да' if connected else 'нет'}\n"
             f"Автоответы: {'включены' if state['enabled'] == '1' else 'выключены'}\n"
             f"Умные ответы: {'вкл' if state['smart_replies'] == '1' else 'выкл (сразу)'}\n"
+            f"Молчать, если ответ не нужен: {'да' if state['skip_unneeded'] == '1' else 'нет'}\n"
             f"Копии входящих: {'да' if state['inbox'] == '1' else 'нет'}\n"
             f"Копии ответов: {'да' if state['notify'] == '1' else 'нет'}\n"
             f"Каскад Gemini: {', '.join(state['models'])}\n"

@@ -30,6 +30,8 @@ services:
       # а источник истины после первого сохранения — БД (Mini App).
       - key: BUSINESS_SMART_REPLIES
         sync: false
+      - key: BUSINESS_SKIP_UNNEEDED
+        sync: false
       - key: BUSINESS_REPLY_DELAY_MINUTES
         sync: false
       - key: BUSINESS_AWAY_MINUTES

@@ -11,7 +11,7 @@
   const esc = (s) => String(s).replace(/[&<>"']/g, c =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-  const BOOL_KEYS = ["enabled", "inbox", "notify", "smart_replies", "night_enabled"];
+  const BOOL_KEYS = ["enabled", "inbox", "notify", "smart_replies", "skip_unneeded", "night_enabled"];
   const INT_KEYS = [
     "reply_delay_minutes", "away_minutes", "away_collect_seconds",
     "max_replies_per_hour", "history_limit", "persona_limit"

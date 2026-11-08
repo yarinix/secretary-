@@ -81,6 +81,7 @@ SPECS: dict[str, dict[str, Any]] = {
                              "label": "Лимит ответов в час"},
     # --- умные отложенные ответы -------------------------------------------
     "smart_replies":        {"type": "bool", "label": "Умные ответы"},
+    "skip_unneeded":        {"type": "bool", "label": "Не отвечать, если ответ не нужен"},
     "reply_delay_minutes":  {"type": "int", "min": 0, "max": 240,
                              "label": "Ждать тишины, мин"},
     "away_minutes":         {"type": "int", "min": 5, "max": 720,
@@ -159,6 +160,7 @@ def build_defaults(cfg_like) -> dict[str, Any]:
         "persona_limit": _int("PERSONA_LIMIT", 800),
         # --- умные отложенные ответы ---
         "smart_replies": "1" if str(_get(cfg_like, "SMART_REPLIES", "1")) != "0" else "0",
+        "skip_unneeded": "1" if str(_get(cfg_like, "SKIP_UNNEEDED", "1")) != "0" else "0",
         "reply_delay_minutes": _int("REPLY_DELAY_MINUTES", 10),
         "away_minutes": _int("AWAY_MINUTES", 60),
         "away_collect_seconds": _int("AWAY_COLLECT_SECONDS", 15),

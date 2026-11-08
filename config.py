@@ -52,6 +52,8 @@ IGNORE_IDS = {int(x) for x in re.findall(r"\d+", os.environ.get("BUSINESS_IGNORE
 # Умные отложенные ответы. Это лишь ДЕФОЛТЫ для пустой базы: как только
 # владелец сохранил значение в Mini App, источник истины — Postgres.
 SMART_REPLIES = os.environ.get("BUSINESS_SMART_REPLIES", "1")
+# Модель сама молчит на «спасибо», «ок», эмодзи и т. п. (дефолт для Mini App).
+SKIP_UNNEEDED = os.environ.get("BUSINESS_SKIP_UNNEEDED", "1")
 REPLY_DELAY_MINUTES = _env_int("BUSINESS_REPLY_DELAY_MINUTES", 10)
 AWAY_MINUTES = _env_int("BUSINESS_AWAY_MINUTES", 60)
 AWAY_COLLECT_SECONDS = _env_int("BUSINESS_AWAY_COLLECT_SECONDS", 15)

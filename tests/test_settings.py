@@ -40,6 +40,7 @@ class TestBuildDefaults(unittest.TestCase):
         self.assertEqual(d["away_minutes"], 60)
         self.assertEqual(d["away_collect_seconds"], 15)
         self.assertEqual(d["smart_replies"], "1")
+        self.assertEqual(d["skip_unneeded"], "1")
         self.assertEqual(d["night_enabled"], "1")
         self.assertEqual(d["night_start"], "01:00")
         self.assertEqual(d["night_end"], "08:00")
@@ -361,6 +362,24 @@ class TestStorageBulk(unittest.TestCase):
             db = Storage(str(Path(tmp) / "s.db"))
             mode = db.db.execute("PRAGMA journal_mode").fetchone()[0]
             self.assertEqual(mode, "wal")
+
+
+class TestSkipUnneededSetting(unittest.TestCase):
+    def test_env_zero_turns_it_off_by_default(self):
+        self.assertEqual(s.build_defaults(fake_cfg(SKIP_UNNEEDED="0"))["skip_unneeded"], "0")
+
+    def test_enabled_when_env_is_missing(self):
+        self.assertEqual(s.build_defaults(fake_cfg())["skip_unneeded"], "1")
+
+    def test_patch_roundtrip(self):
+        d = s.build_defaults(fake_cfg())
+        self.assertEqual(s.validate_patch({"skip_unneeded": "0"}, d), {})
+        self.assertEqual(s.canonical({"skip_unneeded": "0"}, d), {"skip_unneeded": "0"})
+        self.assertEqual(s.load_state({"skip_unneeded": "0"}, d)["skip_unneeded"], "0")
+
+    def test_is_exposed_in_public_schema(self):
+        d = s.build_defaults(fake_cfg())
+        self.assertEqual(s.public_schema(d)["fields"]["skip_unneeded"]["type"], "bool")
 
 
 if __name__ == "__main__":

@@ -100,8 +100,30 @@ def current_time_str(tz_name: str = "Asia/Omsk") -> str:
     return now.strftime("%Y-%m-%d %H:%M (%A), %Z")
 
 
+def build_skip_rule() -> str:
+    """Правило «если ответ не нужен — молчи». Стоит В КОНЦЕ промпта.
+
+    После persona и ночного аддендума: модель сильнее слушается последних
+    указаний, а ночной блок требует «сообщить, что владелец спит» и без этого
+    ответил бы на каждое «спасибо» фразой про сон.
+    """
+    return (
+        "Когда ответ не нужен:\n"
+        "- Если сообщение не требует ответа (благодарность, «ок», «понял», «ладно», эмодзи или "
+        "реакция, прощание, реплика, закрывающая разговор, утверждение без вопроса и просьбы), "
+        "ответь ровно одной меткой [[NO_REPLY]] и больше ничем.\n"
+        "- Если в сообщении есть вопрос или просьба, отвечай как обычно.\n"
+        "- Если сомневаешься, нужен ли ответ, выбирай [[NO_REPLY]]: владелец сам увидит сообщение.\n"
+        "- Это правило важнее остальных, в том числе ночного."
+    )
+
+
 def build_prompt(
-    owner_name: str, persona: str, now_str: str, night_instruction: str = ""
+    owner_name: str,
+    persona: str,
+    now_str: str,
+    night_instruction: str = "",
+    allow_skip: bool = False,
 ) -> str:
     """System prompt. Имени собеседника здесь НЕТ — это закрывает инъекцию через first_name.
 
@@ -132,6 +154,8 @@ def build_prompt(
         prompt += f"\n\nУказания владельца о том, как отвечать:\n{persona}"
     if night_instruction:
         prompt += f"\n\n{night_instruction.strip()}"
+    if allow_skip:
+        prompt += f"\n\n{build_skip_rule()}"
     return prompt
 
 

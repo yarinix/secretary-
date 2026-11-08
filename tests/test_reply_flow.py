@@ -12,6 +12,8 @@ import time
 import unittest
 from types import SimpleNamespace
 
+import reply_policy as policy
+
 try:
     import aiogram  # noqa: F401
     HAS_AIOGRAM = True
@@ -60,6 +62,21 @@ class FakeBot:
 
     async def get_business_connection(self, cid):
         raise AssertionError("подключение должно браться из _connections")
+
+
+class FakeCallback:
+    """Нажатие инлайн-кнопки под уведомлением 📨 (owner chat = 77)."""
+
+    def __init__(self, data, user_id=OWNER_ID, message_id=500, text="📨 Сообщений в пачке: 1"):
+        self.data = data
+        self.from_user = SimpleNamespace(id=user_id)
+        self.message = SimpleNamespace(
+            message_id=message_id, text=text, chat=SimpleNamespace(id=77)
+        )
+        self.answers = []
+
+    async def answer(self, text="", show_alert=False):
+        self.answers.append((text, show_alert))
 
 
 class FakeCascade:
@@ -263,6 +280,189 @@ class TestReplyFlow(unittest.IsolatedAsyncioTestCase):
         await self.main.on_business_message(make_message(message_id=1))
         self.assertIsNone(self.storage.get_pending(1))
         self.assertEqual(self.bot.replies, [])
+
+    # ---------- «ответ не нужен» ----------
+
+    def silent_cascade(self):
+        class Silent(FakeCascade):
+            async def generate(self, system, history, text, media=None):
+                await super().generate(system, history, text, media)
+                return "[[NO_REPLY]]"
+        return Silent
+
+    async def test_no_reply_token_sends_nothing_but_keeps_history(self):
+        self.main.GeminiCascade = self.silent_cascade()
+        await self.main.on_business_message(make_message(text="спасибо!", message_id=1))
+        self.force_due()
+        await self.main.process_due()
+        self.assertEqual(self.bot.replies, [])
+        self.assertIsNone(self.storage.get_pending(1))
+        history = self.storage.get_history(1, 20)
+        self.assertEqual([h["role"] for h in history], ["user"])
+        self.assertIn("спасибо!", history[0]["text"])
+        # Владелец видит, что именно промолчали, а не пустой статус.
+        notes = [e[2] for e in self.bot.edited if "Ответ не нужен" in e[2]]
+        self.assertEqual(len(notes), 1)
+        self.assertIn("спасибо!", notes[0])
+        self.assertEqual(len(self.main._reply_times[1]), 0)  # лимит в час не тратится
+
+    async def test_token_never_leaks_even_when_setting_is_off(self):
+        self.storage.set_setting("skip_unneeded", "0")
+        self.main.GeminiCascade = self.silent_cascade()
+        await self.main.on_business_message(make_message(message_id=1))
+        self.force_due()
+        await self.main.process_due()
+        self.assertEqual(self.bot.replies, [])
+
+    async def test_skip_rule_in_prompt_only_when_enabled(self):
+        systems = []
+
+        class Capturing(FakeCascade):
+            async def generate(self, system, history, text, media=None):
+                systems.append(system)
+                return await super().generate(system, history, text, media)
+
+        self.main.GeminiCascade = Capturing
+        await self.main.on_business_message(make_message(chat_id=1, message_id=1))
+        self.force_due(1)
+        await self.main.process_due()
+        self.storage.set_setting("skip_unneeded", "0")
+        await self.main.on_business_message(make_message(chat_id=2, message_id=2))
+        self.force_due(2)
+        await self.main.process_due()
+        self.assertEqual(len(systems), 2)
+        self.assertIn(policy.NO_REPLY_TOKEN, systems[0])
+        self.assertNotIn("NO_REPLY", systems[1])
+
+    # ---------- любое исходящее сообщение владельца отменяет пачку ----------
+
+    async def test_owner_voice_message_cancels_pending(self):
+        await self.main.on_business_message(make_message(chat_id=1, message_id=1))
+        voice = make_message(chat_id=1, sender_id=OWNER_ID, text=None, message_id=2)
+        voice.voice = SimpleNamespace(file_id="v1")
+        await self.main.on_business_message(voice)
+        self.assertIsNone(self.storage.get_pending(1))
+        self.assertTrue(any("Вы ответили сами" in e[2] for e in self.bot.edited))
+        self.assertIsNotNone(self.storage.get_meta("last_owner_at"))
+
+    async def test_owner_sticker_without_text_cancels_pending(self):
+        await self.main.on_business_message(make_message(chat_id=1, message_id=1))
+        await self.main.on_business_message(
+            make_message(chat_id=1, sender_id=OWNER_ID, text=None, message_id=2)
+        )
+        self.assertIsNone(self.storage.get_pending(1))
+
+    # ---------- кнопки ----------
+
+    async def test_skip_button_cancels_batch_and_remembers_it(self):
+        await self.main.on_business_message(make_message(text="спасибо", message_id=1))
+        cb = FakeCallback(policy.make_callback("skip", 1))
+        await self.main.on_button(cb)
+        self.assertIsNone(self.storage.get_pending(1))
+        self.assertEqual(self.bot.replies, [])
+        self.assertTrue(any("Отвечать не буду" in e[2] and "спасибо" in e[2]
+                            for e in self.bot.edited))
+        self.assertEqual([h["role"] for h in self.storage.get_history(1, 20)], ["user"])
+        self.assertEqual(len(cb.answers), 1)
+
+    async def test_skip_button_on_already_handled_batch_is_harmless(self):
+        cb = FakeCallback(policy.make_callback("skip", 1))
+        await self.main.on_button(cb)
+        self.assertEqual(cb.answers[0][0], "Уже обработано")
+        self.assertEqual(self.bot.edited, [])
+
+    async def test_now_button_replies_without_waiting_for_deadline(self):
+        await self.main.on_business_message(make_message(message_id=1))
+        self.assertEqual(self.bot.replies, [])  # по умолчанию ждём тишины
+        cb = FakeCallback(policy.make_callback("now", 1))
+        await self.main.on_button(cb)
+        self.assertEqual(len(self.bot.replies), 1)
+        self.assertIsNone(self.storage.get_pending(1))
+        self.assertEqual(len(cb.answers), 1)  # на нажатие ответили ровно один раз
+
+    async def test_mute_button_silences_only_this_chat(self):
+        await self.main.on_business_message(make_message(chat_id=1, message_id=1))
+        await self.main.on_button(FakeCallback(policy.make_callback("mute", 1)))
+        self.assertIsNone(self.storage.get_pending(1))
+        await self.main.on_business_message(make_message(chat_id=1, text="ещё", message_id=2))
+        self.assertIsNone(self.storage.get_pending(1))
+        self.assertEqual(self.bot.replies, [])
+        await self.main.on_business_message(make_message(chat_id=2, message_id=3))
+        self.assertIsNotNone(self.storage.get_pending(2))
+        self.assertTrue(any("заглушён" in e[2] for e in self.bot.edited))
+
+    async def test_unmute_button_restores_chat(self):
+        await self.main.on_button(FakeCallback(policy.make_callback("mute", 1)))
+        await self.main.on_button(FakeCallback(policy.make_callback("unmute", 1)))
+        await self.main.on_business_message(make_message(chat_id=1, message_id=1))
+        self.assertIsNotNone(self.storage.get_pending(1))
+
+    async def test_buttons_reject_other_users(self):
+        await self.main.on_business_message(make_message(message_id=1))
+        cb = FakeCallback(policy.make_callback("skip", 1), user_id=999)
+        await self.main.on_button(cb)
+        self.assertIsNotNone(self.storage.get_pending(1))  # пачка цела
+        self.assertTrue(cb.answers[0][1])  # показано как предупреждение
+
+    async def test_inbox_notification_has_three_buttons(self):
+        sent = []
+        real = self.bot.send_message
+
+        async def spy(chat_id, text, **kw):
+            sent.append(kw)
+            return await real(chat_id, text, **kw)
+
+        self.bot.send_message = spy
+        await self.main.on_business_message(make_message(message_id=1))
+        markup = sent[0]["reply_markup"]
+        data = [b.callback_data for row in markup.inline_keyboard for b in row]
+        self.assertEqual(
+            sorted(policy.parse_callback(d)[0] for d in data), ["mute", "now", "skip"]
+        )
+
+    # ---------- устаревший ответ не отправляется ----------
+
+    async def test_reply_not_sent_if_new_message_arrived_during_generation(self):
+        main, texts = self.main, []
+
+        class Racing(FakeCascade):
+            async def generate(self, system, history, text, media=None):
+                texts.append(text)
+                # Пока модель думала, собеседник дописал: пачка пересоздалась.
+                await main.on_business_message(
+                    make_message(text="ещё одно", message_id=2)
+                )
+                return "Ответ"
+
+        main.GeminiCascade = Racing
+        await main.on_business_message(make_message(text="первое", message_id=1))
+        self.force_due()
+        await main.process_due()
+        self.assertEqual(self.bot.replies, [])  # устаревший ответ не ушёл
+        self.assertEqual(len(self.storage.get_pending(1)["parts"]), 2)  # ничего не потеряно
+
+        self.force_due()
+        await main.process_due()
+        self.assertEqual(len(self.bot.replies), 1)  # один ответ на обе реплики
+        self.assertIn("первое", texts[-1])
+        self.assertIn("ещё одно", texts[-1])
+
+    async def test_reply_not_sent_if_owner_answered_during_generation(self):
+        main = self.main
+
+        class Racing(FakeCascade):
+            async def generate(self, system, history, text, media=None):
+                await main.on_business_message(
+                    make_message(chat_id=1, sender_id=OWNER_ID, text="сам", message_id=3)
+                )
+                return "Ответ"
+
+        main.GeminiCascade = Racing
+        await main.on_business_message(make_message(message_id=1))
+        self.force_due()
+        await main.process_due()
+        self.assertEqual(self.bot.replies, [])
+        self.assertIsNone(self.storage.get_pending(1))
 
 
 if __name__ == "__main__":

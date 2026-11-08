@@ -387,6 +387,23 @@ class TestPgPendingContract(unittest.TestCase):
         self.assertEqual(conn.transactions, 1)
         st.close()
 
+    def test_set_due_now_updates_only_unclaimed_batch_of_this_chat(self):
+        conn = FakeConn(rowcount=1)
+        st, _ = build([conn])
+        self.assertTrue(st.set_due_now(7, 1234.5))
+        updates = [c for c in conn.calls if c[0] == "execute" and
+                   c[1].startswith("UPDATE secretary_pending SET due_at")]
+        self.assertEqual(len(updates), 1)
+        self.assertIn("claimed_at IS NULL", updates[0][1])
+        self.assertEqual(updates[0][2], (1234.5, 7))
+        st.close()
+
+    def test_set_due_now_false_when_nothing_updated(self):
+        conn = FakeConn(rowcount=0)
+        st, _ = build([conn])
+        self.assertFalse(st.set_due_now(7, 1.0))
+        st.close()
+
     def test_pending_stats_and_purge(self):
         conn = FakeConn(one=(3, 1500.0), rowcount=2)
         st, _ = build([conn])

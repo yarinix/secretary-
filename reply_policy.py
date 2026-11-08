@@ -139,6 +139,61 @@ def build_night_instruction(owner_name: str, hint: str) -> str:
     )
 
 
+# ----------------------------------------------------------------- «ответ не нужен»
+
+# Метка, которой модель сообщает «на это отвечать не нужно». Боту нельзя ни при
+# каких условиях отправлять её собеседнику, поэтому распознаём устойчиво к
+# регистру, пробелам и дефисам вместо точного сравнения строк.
+NO_REPLY_TOKEN = "[[NO_REPLY]]"
+_NO_REPLY_RE = re.compile(r"\[\[\s*NO[\s_-]*REPLY\s*\]\]", re.IGNORECASE)
+
+
+def is_no_reply(text) -> bool:
+    """Модель решила промолчать (метка стоит где угодно в ответе).
+
+    Если метка есть, то даже при дописанном тексте молчим: ложное молчание
+    безопаснее ответа от имени владельца, а копию входящего он и так видит.
+    """
+    return bool(_NO_REPLY_RE.search(str(text or "")))
+
+
+# ----------------------------------------------------------------- кнопки и заглушение
+
+MUTE_HOURS = 3
+CALLBACK_PREFIX = "sec"
+CALLBACK_ACTIONS = ("skip", "now", "mute", "unmute")
+
+
+def make_callback(action: str, chat_id: int) -> str:
+    """``sec:skip:123`` — укладывается в лимит Telegram 64 байта."""
+    if action not in CALLBACK_ACTIONS:
+        raise ValueError(f"неизвестное действие: {action}")
+    return f"{CALLBACK_PREFIX}:{action}:{int(chat_id)}"
+
+
+def parse_callback(data) -> tuple[str, int] | None:
+    """Обратная операция. Всё чужое и битое возвращает None."""
+    parts = str(data or "").split(":")
+    if len(parts) != 3 or parts[0] != CALLBACK_PREFIX or parts[1] not in CALLBACK_ACTIONS:
+        return None
+    try:
+        return parts[1], int(parts[2])
+    except ValueError:
+        return None
+
+
+def mute_until(now: float, hours: float = MUTE_HOURS) -> float:
+    return float(now) + float(hours) * 3600
+
+
+def is_muted(until_raw, now: float) -> bool:
+    """``until_raw`` — строка из БД (epoch) или None. Битое значение = не заглушён."""
+    try:
+        return float(until_raw) > float(now)
+    except (TypeError, ValueError):
+        return False
+
+
 def should_cancel_on_owner_reply(event_chat_id: int, batch_chat_id: int) -> bool:
     """Владелец ответил сам — отменяем пачку ТОЛЬКО в этом чате.
 

@@ -185,5 +185,87 @@ class TestCancelScope(unittest.TestCase):
         self.assertFalse(p.should_cancel_on_owner_reply("42", 43))
 
 
+class TestNoReplyToken(unittest.TestCase):
+    def test_exact_token(self):
+        self.assertTrue(p.is_no_reply("[[NO_REPLY]]"))
+        self.assertTrue(p.is_no_reply(p.NO_REPLY_TOKEN))
+
+    def test_tolerates_case_spaces_and_separators(self):
+        for variant in ("[[no_reply]]", "[[ NO_REPLY ]]", "[[NO REPLY]]", "[[No-Reply]]",
+                        "  [[NO_REPLY]]\n"):
+            self.assertTrue(p.is_no_reply(variant), variant)
+
+    def test_token_with_extra_text_still_silences(self):
+        # Ложное молчание безопаснее, чем отправить собеседнику метку.
+        self.assertTrue(p.is_no_reply("[[NO_REPLY]] Пожалуйста!"))
+        self.assertTrue(p.is_no_reply("Не нужно. [[NO_REPLY]]"))
+
+    def test_normal_reply_is_not_silenced(self):
+        for text in ("Привет! Он ответит позже.", "no reply needed", "NO_REPLY", "", None,
+                     "[NO_REPLY]", "[[REPLY]]"):
+            self.assertFalse(p.is_no_reply(text), repr(text))
+
+
+class TestCallbackData(unittest.TestCase):
+    def test_roundtrip_for_every_action(self):
+        for action in p.CALLBACK_ACTIONS:
+            data = p.make_callback(action, 123456789)
+            self.assertEqual(p.parse_callback(data), (action, 123456789))
+
+    def test_fits_telegram_limit(self):
+        # callback_data в Telegram: не больше 64 байт, chat_id бывает до 15 цифр.
+        for action in p.CALLBACK_ACTIONS:
+            self.assertLessEqual(len(p.make_callback(action, 10 ** 15 - 1).encode()), 64)
+
+    def test_negative_chat_id_roundtrips(self):
+        self.assertEqual(p.parse_callback(p.make_callback("mute", -100123)), ("mute", -100123))
+
+    def test_unknown_action_rejected_on_make(self):
+        with self.assertRaises(ValueError):
+            p.make_callback("delete", 1)
+
+    def test_garbage_is_rejected_on_parse(self):
+        for bad in (None, "", "sec", "sec:skip", "sec:skip:", "sec:skip:abc",
+                    "sec:explode:1", "x:skip:1", "sec:skip:1:2", 5):
+            self.assertIsNone(p.parse_callback(bad), repr(bad))
+
+
+class TestMute(unittest.TestCase):
+    def test_default_is_three_hours(self):
+        self.assertEqual(p.mute_until(1000.0), 1000.0 + 3 * 3600)
+
+    def test_active_until_deadline(self):
+        until = p.mute_until(1000.0)
+        self.assertTrue(p.is_muted(repr(until), 1000.0))
+        self.assertTrue(p.is_muted(str(until), until - 1))
+        self.assertFalse(p.is_muted(str(until), until))
+        self.assertFalse(p.is_muted(str(until), until + 1))
+
+    def test_missing_or_broken_value_means_not_muted(self):
+        for raw in (None, "", "0", "нет", "nan-not"):
+            self.assertFalse(p.is_muted(raw, 1000.0), repr(raw))
+
+
+class TestSkipRuleInPrompt(unittest.TestCase):
+    def setUp(self):
+        from helpers import build_prompt
+        self.build = build_prompt
+
+    def test_off_by_default_keeps_old_prompt(self):
+        self.assertNotIn("NO_REPLY", self.build("Ярослав", "", "сейчас"))
+
+    def test_enabled_adds_rule_with_the_same_token(self):
+        prompt = self.build("Ярослав", "", "сейчас", allow_skip=True)
+        self.assertIn(p.NO_REPLY_TOKEN, prompt)  # токен в промпте = токен в политике
+        self.assertIn("благодарность", prompt)    # правило называет примеры
+        self.assertIn("важнее остальных", prompt)
+
+    def test_rule_comes_after_persona_and_night(self):
+        prompt = self.build("Ярослав", "отвечай коротко", "сейчас",
+                            "НОЧНОЕ ПРАВИЛО", allow_skip=True)
+        self.assertGreater(prompt.index(p.NO_REPLY_TOKEN), prompt.index("НОЧНОЕ ПРАВИЛО"))
+        self.assertGreater(prompt.index(p.NO_REPLY_TOKEN), prompt.index("отвечай коротко"))
+
+
 if __name__ == "__main__":
     unittest.main()

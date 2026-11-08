@@ -203,6 +203,29 @@ class TestCancelAndStats(unittest.TestCase):
         self.assertIsNone(self.db.get_pending(1))
         self.assertIsNotNone(self.db.get_pending(2))
 
+    def test_set_due_now_moves_deadline_to_now(self):
+        add(self.db, due_at=NOW + 600)
+        self.assertTrue(self.db.set_due_now(1, NOW + 5))
+        self.assertEqual(self.db.get_pending(1)["due_at"], NOW + 5)
+        # Теперь пачка дозрела и подхватывается воркером.
+        self.assertEqual(len(self.db.claim_due(NOW + 6)), 1)
+
+    def test_set_due_now_missing_batch_returns_false(self):
+        self.assertFalse(self.db.set_due_now(999, NOW))
+
+    def test_set_due_now_does_not_touch_claimed_batch(self):
+        add(self.db, due_at=NOW + 1)
+        self.db.claim_due(NOW + 2)
+        before = self.db.get_pending(1)["due_at"]
+        self.assertFalse(self.db.set_due_now(1, NOW + 3))
+        self.assertEqual(self.db.get_pending(1)["due_at"], before)
+
+    def test_set_due_now_only_this_chat(self):
+        add(self.db, chat_id=1, message_id=11, due_at=NOW + 600)
+        add(self.db, chat_id=2, message_id=21, due_at=NOW + 600)
+        self.db.set_due_now(1, NOW)
+        self.assertEqual(self.db.get_pending(2)["due_at"], NOW + 600)
+
     def test_stats_counts_unclaimed_and_min_due(self):
         add(self.db, chat_id=1, message_id=11, due_at=NOW + 600)
         add(self.db, chat_id=2, message_id=21, due_at=NOW + 300)

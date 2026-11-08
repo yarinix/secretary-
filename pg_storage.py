@@ -390,6 +390,20 @@ class PgStorage:
 
         return self._call(fn, transactional=True)
 
+    def set_due_now(self, chat_id: int, now: float) -> bool:
+        """Кнопка «Ответить сейчас»: дедлайн пачки = сейчас. Захваченную не трогаем."""
+
+        def fn(conn: Any) -> bool:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE secretary_pending SET due_at=%s "
+                    "WHERE chat_id=%s AND claimed_at IS NULL",
+                    (float(now), chat_id),
+                )
+                return cur.rowcount > 0
+
+        return self._call(fn)
+
     def set_notify_message_id(self, chat_id: int, message_id: int | None) -> None:
         def fn(conn: Any) -> None:
             with conn.cursor() as cur:
